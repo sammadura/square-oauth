@@ -1,76 +1,4 @@
-@app.route('/api/sync/<merchant_id>')
-def manual_sync(merchant_id):
-    """Manual sync trigger - last year only"""
-    print(f"📥 Manual sync requested for {merchant_id}")
-    
-    try:
-        success = sync_merchant_customers(merchant_id, days_back=365)
-        
-        if success:
-            # Get updated merchant info
-            tokens = get_tokens_from_sheets(merchant_id)
-            merchant_name = tokens.get('merchant_name', 'Unknown') if tokens else 'Unknown'
-            customer_count = tokens.get('total_customers', 0) if tokens else 0
-            
-            return f'''
-            <div style="max-width: 600px; margin: 50px auto; padding: 30px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); font-family: Arial, sans-serif;">
-                <h2 style="color: #28a745; text-align: center;">✅ Sync Completed Successfully!</h2>
-                
-                <div style="background: #e8f5e8; padding: 20px; border-radius: 8px; margin: 20px 0;">
-                    <h3 style="margin-top: 0;">📊 Sync Results</h3>
-                    <p><strong>Business:</strong> {merchant_name}</p>
-                    <p><strong>Merchant ID:</strong> <code>{merchant_id}</code></p>
-                    <p><strong>Customers Synced:</strong> {customer_count:,} (from last year)</p>
-                    <p><strong>Data Saved:</strong> Google Sheets updated</p>
-                </div>
-                
-                <div style="text-align: center; margin: 30px 0;">
-                    <a href="/dashboard" style="background: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 0 10px;">📊 Back to Dashboard</a>
-                    <a href="/api/export/{merchant_id}" style="background: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 0 10px;">📥 Export CSV</a>
-                </div>
-                
-                {f'<div style="background: #fff3cd; padding: 15px; border-radius: 8px; margin: 20px 0;"><strong>Note:</strong> No customers found. This could be a test account or all customers are older than 1 year.</div>' if customer_count == 0 else ''}
-            </div>
-            '''
-        else:
-            return f'''
-            <div style="max-width: 600px; margin: 50px auto; padding: 30px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); font-family: Arial, sans-serif;">
-                <h2 style="color: #dc3545; text-align: center;">❌ Sync Failed</h2>
-                
-                <div style="background: #f8d7da; padding: 20px; border-radius: 8px; margin: 20px 0;">
-                    <h3 style="margin-top: 0;">❌ Error Details</h3>
-                    <p><strong>Merchant ID:</strong> <code>{merchant_id}</code></p>
-                    <p><strong>Issue:</strong> Could not sync customer data</p>
-                    <p><strong>Possible causes:</strong></p>
-                    <ul>
-                        <li>Access token expired (try refresh)</li>
-                        <li>Network connectivity issue</li>
-                        <li>Square API rate limits</li>
-                        <li>Google Sheets permissions</li>
-                    </ul>
-                </div>
-                
-                <div style="text-align: center; margin: 30px 0;">
-                    <a href="/api/refresh/{merchant_id}" style="background: #ffc107; color: black; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 0 10px;">🔄 Try Refresh & Sync</a>
-                    <a href="/debug/{merchant_id}" style="background: #6c757d; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 0 10px;">🔍 Debug</a>
-                    <a href="/dashboard" style="background: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 0 10px;">📊 Dashboard</a>
-                </div>
-            </div>
-            '''
-            
-    except Exception as e:
-        print(f"❌ Manual sync error for {merchant_id}: {e}")
-        return f'''
-        <div style="max-width: 600px; margin: 50px auto; padding: 30px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); font-family: Arial, sans-serif;">
-            <h2 style="color: #dc3545; text-align: center;">❌ Sync Error</h2>
-            <div style="background: #f8d7da; padding: 20px; border-radius: 8px; margin: 20px 0;">
-                <p><strong>Error:</strong> {str(e)}</p>
-            </div>
-            <div style="text-align: center;">
-                <a href="/dashboard" style="background: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px;">Back to Dashboard</a>
-            </div>
-        </div>
-        ''', 500from flask import Flask, redirect, request, jsonify
+from flask import Flask, redirect, request, jsonify, Response
 import requests
 import os
 import json
@@ -103,40 +31,71 @@ def get_google_sheets_client():
         return None
 
 def save_tokens_to_sheets(merchant_id, access_token, refresh_token, merchant_name=None):
-    """Save tokens to Google Sheets"""
+    """Save tokens to Google Sheets with proper error handling"""
     try:
         gc = get_google_sheets_client()
         if not gc:
+            print("❌ Could not connect to Google Sheets")
             return False
         
         spreadsheet_id = os.environ.get('GOOGLE_SHEETS_ID')
-        sheet = gc.open_by_key(spreadsheet_id).worksheet('tokens')
+        
+        # Ensure the tokens sheet exists
+        try:
+            spreadsheet = gc.open_by_key(spreadsheet_id)
+            try:
+                sheet = spreadsheet.worksheet('tokens')
+            except:
+                print("📝 Creating 'tokens' sheet...")
+                sheet = spreadsheet.add_worksheet(title='tokens', rows=1000, cols=8)
+                # Add headers
+                headers = ['merchant_id', 'access_token', 'refresh_token', 'updated_at', 
+                          'status', 'merchant_name', 'last_sync', 'total_customers']
+                sheet.append_row(headers)
+        except Exception as e:
+            print(f"❌ Error accessing spreadsheet: {e}")
+            return False
         
         # Check if merchant already exists
         try:
             records = sheet.get_all_records()
-            for i, record in enumerate(records, start=2):
+            for i, record in enumerate(records, start=2):  # Start at row 2 (after header)
                 if record.get('merchant_id') == merchant_id:
-                    # Update existing record
-                    sheet.update(f'B{i}:F{i}', [[access_token, refresh_token, datetime.now().isoformat(), 'active', merchant_name or record.get('merchant_name', '')]])
+                    # Update existing record - make sure all fields are updated
+                    current_time = datetime.now().isoformat()
+                    sheet.update(f'B{i}:H{i}', [[
+                        access_token, 
+                        refresh_token, 
+                        current_time,  # updated_at
+                        'active',      # status
+                        merchant_name or record.get('merchant_name', ''),  # merchant_name
+                        record.get('last_sync', ''),  # keep existing last_sync
+                        record.get('total_customers', 0)  # keep existing total_customers
+                    ]])
+                    print(f"✅ Updated existing merchant {merchant_id}")
                     return True
-        except:
-            pass
+        except Exception as e:
+            print(f"⚠️ Could not check existing records: {e}")
         
         # Add new record
-        sheet.append_row([
+        current_time = datetime.now().isoformat()
+        new_row = [
             merchant_id,
             access_token,
             refresh_token,
-            datetime.now().isoformat(),
-            'active',
-            merchant_name or '',
-            datetime.now().isoformat(),  # last_sync
-            0  # total_customers
-        ])
+            current_time,      # updated_at
+            'active',          # status
+            merchant_name or '',  # merchant_name
+            '',                # last_sync (empty initially)
+            0                  # total_customers (0 initially)
+        ]
+        
+        sheet.append_row(new_row)
+        print(f"✅ Added new merchant {merchant_id}")
         return True
+        
     except Exception as e:
-        print(f"Error saving to sheets: {e}")
+        print(f"❌ Error saving to sheets: {e}")
         return False
 
 def get_tokens_from_sheets(merchant_id):
@@ -195,6 +154,7 @@ def update_sync_status(merchant_id, total_customers):
     try:
         gc = get_google_sheets_client()
         if not gc:
+            print("❌ Could not connect to Google Sheets for sync update")
             return False
         
         spreadsheet_id = os.environ.get('GOOGLE_SHEETS_ID')
@@ -203,11 +163,16 @@ def update_sync_status(merchant_id, total_customers):
         records = sheet.get_all_records()
         for i, record in enumerate(records, start=2):
             if record.get('merchant_id') == merchant_id:
-                sheet.update(f'G{i}:H{i}', [[datetime.now().isoformat(), total_customers]])
+                current_time = datetime.now().isoformat()
+                # Update last_sync (column G) and total_customers (column H)
+                sheet.update(f'G{i}:H{i}', [[current_time, total_customers]])
+                print(f"✅ Updated sync status for {merchant_id}: {total_customers} customers")
                 return True
+        
+        print(f"❌ Merchant {merchant_id} not found for sync update")
         return False
     except Exception as e:
-        print(f"Error updating sync status: {e}")
+        print(f"❌ Error updating sync status: {e}")
         return False
 
 def save_customer_data(merchant_id, customers):
@@ -547,6 +512,18 @@ def background_sync():
             print("😴 Sleeping for 1 hour before retrying...")
             time.sleep(60 * 60)  # Sleep for 1 hour on error
 
+def should_sync_merchant(last_sync, threshold_days=3):
+    """Check if merchant needs syncing"""
+    if not last_sync:
+        return True
+    
+    try:
+        last_sync_date = datetime.fromisoformat(last_sync.replace('Z', '+00:00'))
+        days_since_sync = (datetime.now() - last_sync_date.replace(tzinfo=None)).days
+        return days_since_sync >= threshold_days
+    except:
+        return True
+
 @app.route('/')
 def home():
     return '''
@@ -821,6 +798,80 @@ def dashboard():
     
     return html
 
+@app.route('/api/sync/<merchant_id>')
+def manual_sync(merchant_id):
+    """Manual sync trigger - last year only"""
+    print(f"📥 Manual sync requested for {merchant_id}")
+    
+    try:
+        success = sync_merchant_customers(merchant_id, days_back=365)
+        
+        if success:
+            # Get updated merchant info
+            tokens = get_tokens_from_sheets(merchant_id)
+            merchant_name = tokens.get('merchant_name', 'Unknown') if tokens else 'Unknown'
+            customer_count = tokens.get('total_customers', 0) if tokens else 0
+            
+            return f'''
+            <div style="max-width: 600px; margin: 50px auto; padding: 30px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); font-family: Arial, sans-serif;">
+                <h2 style="color: #28a745; text-align: center;">✅ Sync Completed Successfully!</h2>
+                
+                <div style="background: #e8f5e8; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                    <h3 style="margin-top: 0;">📊 Sync Results</h3>
+                    <p><strong>Business:</strong> {merchant_name}</p>
+                    <p><strong>Merchant ID:</strong> <code>{merchant_id}</code></p>
+                    <p><strong>Customers Synced:</strong> {customer_count:,} (from last year)</p>
+                    <p><strong>Data Saved:</strong> Google Sheets updated</p>
+                </div>
+                
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="/dashboard" style="background: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 0 10px;">📊 Back to Dashboard</a>
+                    <a href="/api/export/{merchant_id}" style="background: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 0 10px;">📥 Export CSV</a>
+                </div>
+                
+                {f'<div style="background: #fff3cd; padding: 15px; border-radius: 8px; margin: 20px 0;"><strong>Note:</strong> No customers found. This could be a test account or all customers are older than 1 year.</div>' if customer_count == 0 else ''}
+            </div>
+            '''
+        else:
+            return f'''
+            <div style="max-width: 600px; margin: 50px auto; padding: 30px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); font-family: Arial, sans-serif;">
+                <h2 style="color: #dc3545; text-align: center;">❌ Sync Failed</h2>
+                
+                <div style="background: #f8d7da; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                    <h3 style="margin-top: 0;">❌ Error Details</h3>
+                    <p><strong>Merchant ID:</strong> <code>{merchant_id}</code></p>
+                    <p><strong>Issue:</strong> Could not sync customer data</p>
+                    <p><strong>Possible causes:</strong></p>
+                    <ul>
+                        <li>Access token expired (try refresh)</li>
+                        <li>Network connectivity issue</li>
+                        <li>Square API rate limits</li>
+                        <li>Google Sheets permissions</li>
+                    </ul>
+                </div>
+                
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="/api/refresh/{merchant_id}" style="background: #ffc107; color: black; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 0 10px;">🔄 Try Refresh & Sync</a>
+                    <a href="/debug/{merchant_id}" style="background: #6c757d; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 0 10px;">🔍 Debug</a>
+                    <a href="/dashboard" style="background: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 0 10px;">📊 Dashboard</a>
+                </div>
+            </div>
+            '''
+            
+    except Exception as e:
+        print(f"❌ Manual sync error for {merchant_id}: {e}")
+        return f'''
+        <div style="max-width: 600px; margin: 50px auto; padding: 30px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); font-family: Arial, sans-serif;">
+            <h2 style="color: #dc3545; text-align: center;">❌ Sync Error</h2>
+            <div style="background: #f8d7da; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                <p><strong>Error:</strong> {str(e)}</p>
+            </div>
+            <div style="text-align: center;">
+                <a href="/dashboard" style="background: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px;">Back to Dashboard</a>
+            </div>
+        </div>
+        ''', 500
+
 @app.route('/api/refresh/<merchant_id>')
 def refresh_and_sync(merchant_id):
     """Refresh token and sync customer data - no re-login required"""
@@ -994,7 +1045,6 @@ def export_customers(merchant_id):
             csv_data = output.getvalue()
             
             # Return CSV file
-            from flask import Response
             return Response(
                 csv_data,
                 mimetype='text/csv',
@@ -1017,9 +1067,46 @@ def list_merchants():
     merchants = get_all_active_merchants()
     return jsonify({'merchants': merchants})
 
-@app.route('/health')
-def health():
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+@app.route('/api/cron-sync')
+def cron_sync():
+    """External cron sync endpoint"""
+    # Verify authorization
+    auth_token = request.headers.get('Authorization')
+    expected_token = f"Bearer {os.environ.get('CRON_TOKEN')}"
+    
+    if auth_token != expected_token:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    print(f"🤖 Cron sync triggered at {datetime.now().isoformat()}")
+    
+    merchants = get_all_active_merchants()
+    results = []
+    synced_count = 0
+    
+    for merchant in merchants:
+        merchant_id = merchant['merchant_id']
+        merchant_name = merchant.get('merchant_name', 'Unknown')
+        last_sync = merchant.get('last_sync')
+        
+        if should_sync_merchant(last_sync):
+            print(f"🔄 Syncing {merchant_name} ({merchant_id})")
+            success = sync_merchant_customers(merchant_id, days_back=365)
+            
+            if success:
+                synced_count += 1
+                results.append(f"✅ {merchant_name}")
+            else:
+                results.append(f"❌ {merchant_name}")
+        else:
+            results.append(f"⏭️ {merchant_name} (recently synced)")
+    
+    return jsonify({
+        'status': 'completed',
+        'synced_count': synced_count,
+        'total_merchants': len(merchants),
+        'results': results,
+        'timestamp': datetime.now().isoformat()
+    })
 
 @app.route('/debug/<merchant_id>')
 def debug_merchant(merchant_id):
@@ -1126,6 +1213,10 @@ def debug_merchant(merchant_id):
     """
     
     return html
+
+@app.route('/health')
+def health():
+    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
 if __name__ == '__main__':
     # Start background sync thread
