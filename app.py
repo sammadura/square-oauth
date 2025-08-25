@@ -238,10 +238,13 @@ def update_sync_status(merchant_id, total_customers):
         return False
 
 def save_customer_data(merchant_id, customers):
-    """Save customer data to a separate sheet"""
+    """Save customer data to a separate sheet with robust error handling"""
     try:
+        print(f"💾 Starting to save {len(customers)} customers for {merchant_id}")
+        
         gc = get_google_sheets_client()
         if not gc:
+            print("❌ Could not connect to Google Sheets")
             return False
         
         spreadsheet_id = os.environ.get('GOOGLE_SHEETS_ID')
@@ -249,13 +252,19 @@ def save_customer_data(merchant_id, customers):
         # Create or get customer data sheet for this merchant
         sheet_name = f"customers_{merchant_id}"
         try:
-            sheet = gc.open_by_key(spreadsheet_id).worksheet(sheet_name)
-            sheet.clear()  # Clear existing data
-        except:
             spreadsheet = gc.open_by_key(spreadsheet_id)
-            sheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=30)
+            try:
+                sheet = spreadsheet.worksheet(sheet_name)
+                sheet.clear()  # Clear existing data
+                print(f"📝 Cleared existing data in sheet {sheet_name}")
+            except:
+                print(f"📝 Creating new sheet {sheet_name}")
+                sheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=30)
+        except Exception as sheet_error:
+            print(f"❌ Error accessing/creating sheet: {sheet_error}")
+            return False
         
-        # Headers - now including invoice fields
+        # Headers - including invoice fields
         headers = [
             'customer_id', 'given_name', 'family_name', 'company_name', 'nickname',
             'email_address', 'phone_number', 'address_line_1', 'address_line_2', 
@@ -267,58 +276,78 @@ def save_customer_data(merchant_id, customers):
         
         # Prepare data rows
         rows = [headers]
+        processed_customers = 0
+        
         for customer in customers:
-            # Get latest invoice data for this customer if available
-            latest_invoice = customer.get('latest_invoice', {})
-            
-            row = [
-                customer.get('id', ''),
-                customer.get('given_name', ''),
-                customer.get('family_name', ''),
-                customer.get('company_name', ''),
-                customer.get('nickname', ''),
-                customer.get('email_address', ''),
-                customer.get('phone_number', ''),
-                customer.get('address', {}).get('address_line_1', ''),
-                customer.get('address', {}).get('address_line_2', ''),
-                customer.get('address', {}).get('locality', ''),
-                customer.get('address', {}).get('administrative_district_level_1', ''),
-                customer.get('address', {}).get('postal_code', ''),
-                customer.get('address', {}).get('country', ''),
-                customer.get('created_at', ''),
-                customer.get('updated_at', ''),
-                customer.get('birthday', ''),
-                customer.get('note', ''),
-                customer.get('reference_id', ''),
-                ', '.join(customer.get('group_ids', [])),
-                ', '.join(customer.get('segment_ids', [])),
-                json.dumps(customer.get('preferences', {})) if customer.get('preferences') else '',
-                str(customer.get('version', '')),
-                datetime.now().isoformat(),
-                # Invoice fields
-                latest_invoice.get('id', ''),
-                latest_invoice.get('sale_or_service_date', ''),
-                latest_invoice.get('due_date', ''),
-                latest_invoice.get('invoice_status', ''),
-                str(latest_invoice.get('order_total', {}).get('amount', '')) if latest_invoice.get('order_total') else ''
-            ]
-            rows.append(row)
+            try:
+                # Get latest invoice data for this customer if available
+                latest_invoice = customer.get('latest_invoice', {})
+                
+                row = [
+                    customer.get('id', ''),
+                    customer.get('given_name', ''),
+                    customer.get('family_name', ''),
+                    customer.get('company_name', ''),
+                    customer.get('nickname', ''),
+                    customer.get('email_address', ''),
+                    customer.get('phone_number', ''),
+                    customer.get('address', {}).get('address_line_1', ''),
+                    customer.get('address', {}).get('address_line_2', ''),
+                    customer.get('address', {}).get('locality', ''),
+                    customer.get('address', {}).get('administrative_district_level_1', ''),
+                    customer.get('address', {}).get('postal_code', ''),
+                    customer.get('address', {}).get('country', ''),
+                    customer.get('created_at', ''),
+                    customer.get('updated_at', ''),
+                    customer.get('birthday', ''),
+                    customer.get('note', ''),
+                    customer.get('reference_id', ''),
+                    ', '.join(customer.get('group_ids', [])),
+                    ', '.join(customer.get('segment_ids', [])),
+                    json.dumps(customer.get('preferences', {})) if customer.get('preferences') else '',
+                    str(customer.get('version', '')),
+                    datetime.now().isoformat(),
+                    # Invoice fields
+                    latest_invoice.get('id', ''),
+                    latest_invoice.get('sale_or_service_date', ''),
+                    latest_invoice.get('due_date', ''),
+                    latest_invoice.get('invoice_status', ''),
+                    latest_invoice.get('invoice_amount', '')
+                ]
+                rows.append(row)
+                processed_customers += 1
+                
+            except Exception as customer_error:
+                print(f"⚠️ Error processing customer {customer.get('id', 'unknown')}: {customer_error}")
+                continue
+        
+        print(f"📊 Processed {processed_customers} customers successfully")
         
         # Batch update for better performance
         if len(rows) > 1:
-            sheet.update(f'A1:Z{len(rows)}', rows)
-            print(f"✅ Saved {len(rows)-1} customer records to sheet {sheet_name}")
+            try:
+                range_name = f'A1:Y{len(rows)}'
+                print(f"📤 Updating Google Sheets range: {range_name}")
+                sheet.update(range_name, rows)
+                print(f"✅ Successfully saved {len(rows)-1} customer records to sheet {sheet_name}")
+                return True
+            except Exception as update_error:
+                print(f"❌ Error updating Google Sheets: {update_error}")
+                return False
         else:
             print(f"⚠️ No customer data to save for {merchant_id}")
+            return False
             
-        return True
     except Exception as e:
-        print(f"Error saving customer data: {e}")
+        print(f"❌ Error saving customer data: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def fetch_customer_invoices(merchant_id, access_token, customer_ids, use_production=False):
-    """Fetch latest invoice data for customers"""
+    """Fetch latest invoice data for customers with robust error handling"""
     if not customer_ids:
+        print(f"No customer IDs provided for invoice fetch")
         return {}
     
     base_url = 'https://connect.squareup.com' if use_production else 'https://connect.squareupsandbox.com'
@@ -331,17 +360,10 @@ def fetch_customer_invoices(merchant_id, access_token, customer_ids, use_product
     customer_invoices = {}
     
     try:
-        # Search for invoices
+        print(f"🧾 Attempting to fetch invoices for {len(customer_ids)} customers...")
+        
+        # Search for invoices with minimal query first
         search_data = {
-            'query': {
-                'filter': {
-                    'invoice_request_method': ['EMAIL', 'CHARGE_CARD_ON_FILE', 'SHARE_MANUALLY']
-                },
-                'sort': {
-                    'field': 'INVOICE_SORT_DATE',
-                    'order': 'DESC'
-                }
-            },
             'limit': 100
         }
         
@@ -350,48 +372,68 @@ def fetch_customer_invoices(merchant_id, access_token, customer_ids, use_product
         if response.status_code == 200:
             data = response.json()
             invoices = data.get('invoices', [])
+            print(f"📋 Found {len(invoices)} total invoices")
             
             # Map invoices to customers (get latest invoice per customer)
             for invoice in invoices:
-                primary_recipient = invoice.get('primary_recipient', {})
-                customer_id = primary_recipient.get('customer_id')
-                
-                if customer_id in customer_ids and customer_id not in customer_invoices:
-                    # Get invoice details
-                    invoice_request = invoice.get('invoice_request_method', {})
-                    payment_requests = invoice.get('payment_requests', [])
+                try:
+                    # Extract customer ID from invoice
+                    primary_recipient = invoice.get('primary_recipient', {})
+                    customer_id = primary_recipient.get('customer_id')
                     
-                    # Extract sale_or_service_date and due_date from payment requests
-                    sale_or_service_date = ''
-                    due_date = ''
-                    
-                    if payment_requests:
-                        first_payment = payment_requests[0]
-                        due_date = first_payment.get('due_date', '')
+                    if customer_id and customer_id in customer_ids and customer_id not in customer_invoices:
+                        # Extract invoice details safely
+                        payment_requests = invoice.get('payment_requests', [])
                         
-                        # Sale/service date might be in the order
-                        if 'tipping_enabled' in first_payment:
+                        # Get dates from payment requests if available
+                        due_date = ''
+                        sale_or_service_date = ''
+                        
+                        if payment_requests and len(payment_requests) > 0:
+                            first_payment = payment_requests[0]
+                            due_date = first_payment.get('due_date', '')
+                            # Use invoice created date as service date if not specified
                             sale_or_service_date = invoice.get('created_at', '')
+                        
+                        # Get invoice amount
+                        invoice_amount = ''
+                        order = invoice.get('order', {})
+                        if order:
+                            total_money = order.get('total_money', {})
+                            if total_money and total_money.get('amount'):
+                                invoice_amount = str(total_money.get('amount', 0))
+                        
+                        customer_invoices[customer_id] = {
+                            'id': invoice.get('id', ''),
+                            'sale_or_service_date': sale_or_service_date,
+                            'due_date': due_date,
+                            'invoice_status': invoice.get('status', ''),
+                            'invoice_amount': invoice_amount,
+                            'created_at': invoice.get('created_at', ''),
+                            'updated_at': invoice.get('updated_at', '')
+                        }
+                        
+                except Exception as invoice_parse_error:
+                    print(f"⚠️ Error parsing individual invoice: {invoice_parse_error}")
+                    continue
                     
-                    customer_invoices[customer_id] = {
-                        'id': invoice.get('id', ''),
-                        'sale_or_service_date': sale_or_service_date,
-                        'due_date': due_date,
-                        'invoice_status': invoice.get('status', ''),
-                        'order_total': invoice.get('order', {}).get('total_money', {}),
-                        'created_at': invoice.get('created_at', ''),
-                        'updated_at': invoice.get('updated_at', '')
-                    }
+        elif response.status_code == 403:
+            print(f"⚠️ Invoice permission denied - continuing without invoice data")
+            return {}
         else:
-            print(f"Error fetching invoices for {merchant_id}: {response.status_code} - {response.text}")
+            print(f"⚠️ Invoice API error {response.status_code}: {response.text}")
+            return {}
             
     except Exception as e:
-        print(f"Error fetching invoices for {merchant_id}: {e}")
+        print(f"⚠️ Error fetching invoices for {merchant_id}: {e}")
+        print("Continuing without invoice data...")
+        return {}
     
-    print(f"Fetched invoice data for {len(customer_invoices)} customers")
+    print(f"✅ Successfully mapped invoice data for {len(customer_invoices)} customers")
     return customer_invoices
+
 def fetch_all_customers(merchant_id, access_token, use_production=False, days_back=365):
-    """Fetch customers for a merchant from the last specified number of days with invoice data"""
+    """Fetch customers for a merchant with robust invoice integration"""
     base_url = 'https://connect.squareup.com' if use_production else 'https://connect.squareupsandbox.com'
     headers = {
         'Authorization': f'Bearer {access_token}',
@@ -416,6 +458,8 @@ def fetch_all_customers(merchant_id, access_token, use_production=False, days_ba
     
     all_customers = []
     cursor = None
+    
+    print(f"👥 Fetching customers for {merchant_id} from {cutoff_date}...")
     
     while True:
         if cursor:
@@ -470,18 +514,31 @@ def fetch_all_customers(merchant_id, access_token, use_production=False, days_ba
             print(f"Request error for {merchant_id}: {e}")
             break
     
-    # Now fetch invoice data for these customers
+    print(f"✅ Fetched {len(all_customers)} customers successfully")
+    
+    # Now try to fetch invoice data for these customers
     if all_customers:
         customer_ids = [customer.get('id') for customer in all_customers if customer.get('id')]
-        invoice_data = fetch_customer_invoices(merchant_id, access_token, customer_ids, use_production)
+        print(f"🧾 Attempting to fetch invoice data for {len(customer_ids)} customers...")
         
-        # Merge invoice data with customer data
-        for customer in all_customers:
-            customer_id = customer.get('id')
-            if customer_id in invoice_data:
-                customer['latest_invoice'] = invoice_data[customer_id]
+        try:
+            invoice_data = fetch_customer_invoices(merchant_id, access_token, customer_ids, use_production)
+            
+            # Merge invoice data with customer data
+            matched_invoices = 0
+            for customer in all_customers:
+                customer_id = customer.get('id')
+                if customer_id and customer_id in invoice_data:
+                    customer['latest_invoice'] = invoice_data[customer_id]
+                    matched_invoices += 1
+            
+            print(f"✅ Merged invoice data for {matched_invoices} customers")
+            
+        except Exception as e:
+            print(f"⚠️ Invoice fetch failed: {e}")
+            print("Continuing with customer data only...")
     
-    print(f"Fetched {len(all_customers)} customers from last {days_back} days for {merchant_id}")
+    print(f"🎉 Final result: {len(all_customers)} customers from last {days_back} days for {merchant_id}")
     return all_customers
 
 def fetch_customers_fallback(merchant_id, access_token, use_production=False, days_back=365):
@@ -554,27 +611,47 @@ def fetch_customers_fallback(merchant_id, access_token, use_production=False, da
     return all_customers
 
 def sync_merchant_customers(merchant_id, days_back=365):
-    """Sync customers for a specific merchant (last year only by default)"""
-    print(f"Starting customer sync for merchant {merchant_id} (last {days_back} days)")
+    """Enhanced sync with detailed logging"""
+    print(f"🚀 Starting comprehensive customer sync for merchant {merchant_id} (last {days_back} days)")
     
-    tokens = get_tokens_from_sheets(merchant_id)
-    if not tokens:
-        print(f"No tokens found for merchant {merchant_id}")
-        return False
-    
-    customers = fetch_all_customers(merchant_id, tokens['access_token'], days_back=days_back)
-    
-    if customers or customers == []:  # Handle both cases: customers found or empty list
+    try:
+        # Step 1: Get tokens
+        print("📋 Step 1: Getting merchant tokens...")
+        tokens = get_tokens_from_sheets(merchant_id)
+        if not tokens:
+            print(f"❌ No tokens found for merchant {merchant_id}")
+            return False
+        
+        print(f"✅ Tokens retrieved for {tokens.get('merchant_name', 'Unknown')}")
+        
+        # Step 2: Fetch customers
+        print("👥 Step 2: Fetching customer data from Square...")
+        customers = fetch_all_customers(merchant_id, tokens['access_token'], days_back=days_back)
+        
+        if customers is None:
+            print(f"❌ Failed to fetch customers for {merchant_id}")
+            return False
+        
+        print(f"✅ Retrieved {len(customers)} customers")
+        
+        # Step 3: Save to Google Sheets
+        print("💾 Step 3: Saving customer data to Google Sheets...")
         success = save_customer_data(merchant_id, customers)
+        
         if success:
+            # Step 4: Update sync status
+            print("📊 Step 4: Updating sync status...")
             update_sync_status(merchant_id, len(customers))
-            print(f"Successfully synced {len(customers)} customers for {merchant_id}")
+            print(f"🎉 Successfully synced {len(customers)} customers for {merchant_id}")
             return True
         else:
-            print(f"Failed to save customer data for {merchant_id}")
+            print(f"❌ Failed to save customer data for {merchant_id}")
             return False
-    else:
-        print(f"Failed to fetch customers for {merchant_id}")
+            
+    except Exception as e:
+        print(f"❌ Sync error for {merchant_id}: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def should_sync_merchant(last_sync, threshold_days=3):
