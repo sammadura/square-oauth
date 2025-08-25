@@ -253,20 +253,24 @@ def save_customer_data(merchant_id, customers):
             sheet.clear()  # Clear existing data
         except:
             spreadsheet = gc.open_by_key(spreadsheet_id)
-            sheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=25)
+            sheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=30)
         
-        # Headers
+        # Headers - now including invoice fields
         headers = [
             'customer_id', 'given_name', 'family_name', 'company_name', 'nickname',
             'email_address', 'phone_number', 'address_line_1', 'address_line_2', 
             'locality', 'administrative_district_level_1', 'postal_code', 'country',
             'created_at', 'updated_at', 'birthday', 'note', 'reference_id',
-            'group_ids', 'segment_ids', 'preferences', 'version', 'sync_date'
+            'group_ids', 'segment_ids', 'preferences', 'version', 'sync_date',
+            'latest_invoice_id', 'sale_or_service_date', 'due_date', 'invoice_status', 'invoice_amount'
         ]
         
         # Prepare data rows
         rows = [headers]
         for customer in customers:
+            # Get latest invoice data for this customer if available
+            latest_invoice = customer.get('latest_invoice', {})
+            
             row = [
                 customer.get('id', ''),
                 customer.get('given_name', ''),
@@ -290,13 +294,19 @@ def save_customer_data(merchant_id, customers):
                 ', '.join(customer.get('segment_ids', [])),
                 json.dumps(customer.get('preferences', {})) if customer.get('preferences') else '',
                 str(customer.get('version', '')),
-                datetime.now().isoformat()
+                datetime.now().isoformat(),
+                # Invoice fields
+                latest_invoice.get('id', ''),
+                latest_invoice.get('sale_or_service_date', ''),
+                latest_invoice.get('due_date', ''),
+                latest_invoice.get('invoice_status', ''),
+                str(latest_invoice.get('order_total', {}).get('amount', '')) if latest_invoice.get('order_total') else ''
             ]
             rows.append(row)
         
         # Batch update for better performance
         if len(rows) > 1:
-            sheet.update(f'A1:W{len(rows)}', rows)
+            sheet.update(f'A1:Z{len(rows)}', rows)
             print(f"✅ Saved {len(rows)-1} customer records to sheet {sheet_name}")
         else:
             print(f"⚠️ No customer data to save for {merchant_id}")
@@ -306,8 +316,82 @@ def save_customer_data(merchant_id, customers):
         print(f"Error saving customer data: {e}")
         return False
 
+def fetch_customer_invoices(merchant_id, access_token, customer_ids, use_production=False):
+    """Fetch latest invoice data for customers"""
+    if not customer_ids:
+        return {}
+    
+    base_url = 'https://connect.squareup.com' if use_production else 'https://connect.squareupsandbox.com'
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json',
+        'Square-Version': '2023-10-18'
+    }
+    
+    customer_invoices = {}
+    
+    try:
+        # Search for invoices
+        search_data = {
+            'query': {
+                'filter': {
+                    'invoice_request_method': ['EMAIL', 'CHARGE_CARD_ON_FILE', 'SHARE_MANUALLY']
+                },
+                'sort': {
+                    'field': 'INVOICE_SORT_DATE',
+                    'order': 'DESC'
+                }
+            },
+            'limit': 100
+        }
+        
+        response = requests.post(f'{base_url}/v2/invoices/search', headers=headers, json=search_data)
+        
+        if response.status_code == 200:
+            data = response.json()
+            invoices = data.get('invoices', [])
+            
+            # Map invoices to customers (get latest invoice per customer)
+            for invoice in invoices:
+                primary_recipient = invoice.get('primary_recipient', {})
+                customer_id = primary_recipient.get('customer_id')
+                
+                if customer_id in customer_ids and customer_id not in customer_invoices:
+                    # Get invoice details
+                    invoice_request = invoice.get('invoice_request_method', {})
+                    payment_requests = invoice.get('payment_requests', [])
+                    
+                    # Extract sale_or_service_date and due_date from payment requests
+                    sale_or_service_date = ''
+                    due_date = ''
+                    
+                    if payment_requests:
+                        first_payment = payment_requests[0]
+                        due_date = first_payment.get('due_date', '')
+                        
+                        # Sale/service date might be in the order
+                        if 'tipping_enabled' in first_payment:
+                            sale_or_service_date = invoice.get('created_at', '')
+                    
+                    customer_invoices[customer_id] = {
+                        'id': invoice.get('id', ''),
+                        'sale_or_service_date': sale_or_service_date,
+                        'due_date': due_date,
+                        'invoice_status': invoice.get('status', ''),
+                        'order_total': invoice.get('order', {}).get('total_money', {}),
+                        'created_at': invoice.get('created_at', ''),
+                        'updated_at': invoice.get('updated_at', '')
+                    }
+        else:
+            print(f"Error fetching invoices for {merchant_id}: {response.status_code} - {response.text}")
+            
+    except Exception as e:
+        print(f"Error fetching invoices for {merchant_id}: {e}")
+    
+    print(f"Fetched invoice data for {len(customer_invoices)} customers")
+    return customer_invoices
 def fetch_all_customers(merchant_id, access_token, use_production=False, days_back=365):
-    """Fetch customers for a merchant from the last specified number of days"""
+    """Fetch customers for a merchant from the last specified number of days with invoice data"""
     base_url = 'https://connect.squareup.com' if use_production else 'https://connect.squareupsandbox.com'
     headers = {
         'Authorization': f'Bearer {access_token}',
@@ -385,6 +469,17 @@ def fetch_all_customers(merchant_id, access_token, use_production=False, days_ba
         except Exception as e:
             print(f"Request error for {merchant_id}: {e}")
             break
+    
+    # Now fetch invoice data for these customers
+    if all_customers:
+        customer_ids = [customer.get('id') for customer in all_customers if customer.get('id')]
+        invoice_data = fetch_customer_invoices(merchant_id, access_token, customer_ids, use_production)
+        
+        # Merge invoice data with customer data
+        for customer in all_customers:
+            customer_id = customer.get('id')
+            if customer_id in invoice_data:
+                customer['latest_invoice'] = invoice_data[customer_id]
     
     print(f"Fetched {len(all_customers)} customers from last {days_back} days for {merchant_id}")
     return all_customers
@@ -599,7 +694,8 @@ def signin():
     if not redirect_uri:
         return 'Error: SQUARE_REDIRECT_URI not configured', 500
     
-    scope = 'CUSTOMERS_READ MERCHANT_PROFILE_READ'
+    # Updated scope to include invoices
+    scope = 'CUSTOMERS_READ MERCHANT_PROFILE_READ INVOICES_READ'
     
     auth_url = (f'{base_url}/oauth2/authorize'
                f'?client_id={client_id}'
