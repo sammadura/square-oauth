@@ -244,6 +244,66 @@ def update_sync_status(merchant_id, total_customers):
         print(f"❌ Error updating sync status: {e}")
         return False
 
+def should_refresh_token(updated_at, threshold_days=25):
+    """Check if token needs proactive refresh (refresh 5 days before 30-day expiration)"""
+    if not updated_at:
+        return True
+    
+    try:
+        token_date = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+        days_old = (datetime.now() - token_date.replace(tzinfo=None)).days
+        return days_old >= threshold_days  # Refresh when token is 25+ days old
+    except:
+        return True
+
+def proactive_refresh_token(merchant_id):
+    """Proactively refresh a merchant's token"""
+    print(f"🔑 Proactively refreshing token for {merchant_id}")
+    
+    try:
+        # Get current tokens
+        tokens = get_tokens_from_sheets(merchant_id)
+        if not tokens:
+            print(f"❌ No tokens found for merchant {merchant_id}")
+            return False
+        
+        refresh_token = tokens.get('refresh_token')
+        if not refresh_token:
+            print(f"❌ No refresh token found for merchant {merchant_id}")
+            return False
+        
+        # Refresh the access token
+        client_id = os.environ.get('SQUARE_CLIENT_ID')
+        client_secret = os.environ.get('SQUARE_CLIENT_SECRET')
+        
+        token_url = 'https://connect.squareupsandbox.com/oauth2/token'
+        response = requests.post(token_url, data={
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'refresh_token': refresh_token,
+            'grant_type': 'refresh_token'
+        })
+        
+        if response.status_code == 200:
+            token_data = response.json()
+            new_access_token = token_data.get('access_token')
+            new_refresh_token = token_data.get('refresh_token', refresh_token)
+            
+            # Update tokens in Google Sheets
+            if save_tokens_to_sheets(merchant_id, new_access_token, new_refresh_token, tokens.get('merchant_name')):
+                print(f"✅ Proactively refreshed token for {merchant_id}")
+                return True
+            else:
+                print(f"❌ Failed to save refreshed token for {merchant_id}")
+                return False
+        else:
+            print(f"❌ Token refresh failed for {merchant_id}: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error in proactive refresh for {merchant_id}: {e}")
+        return False
+
 def fetch_customer_invoices(merchant_id, access_token, customer_ids, use_production=False):
     """Fetch latest invoice data for customers with robust error handling"""
     if not customer_ids:
@@ -722,12 +782,14 @@ def should_sync_merchant(last_sync, threshold_days=3):
         return True
 
 def background_sync():
-    """Background task to sync all merchants - optimized for free tier"""
+    """Enhanced background task with proactive token refresh and customer sync"""
     sync_interval_hours = 12
     sync_threshold_days = 3
+    token_refresh_threshold_days = 25  # Refresh tokens when 25+ days old
     
-    print(f"🚀 Background sync started - will run every {sync_interval_hours} hours")
+    print(f"🚀 Enhanced background sync started - will run every {sync_interval_hours} hours")
     print(f"📅 Will sync merchants not updated in {sync_threshold_days}+ days")
+    print(f"🔑 Will refresh tokens that are {token_refresh_threshold_days}+ days old")
     
     while True:
         try:
@@ -740,6 +802,7 @@ def background_sync():
             synced_count = 0
             skipped_count = 0
             failed_count = 0
+            refreshed_tokens = 0
             
             for i, merchant in enumerate(merchants, 1):
                 merchant_id = merchant['merchant_id']
@@ -748,7 +811,20 @@ def background_sync():
                 
                 print(f"\n[{i}/{len(merchants)}] Checking {merchant_name} ({merchant_id})")
                 
-                # Check if we need to sync
+                # Step 1: Check if token needs proactive refresh
+                tokens = get_tokens_from_sheets(merchant_id)
+                if tokens:
+                    token_updated_at = tokens.get('updated_at')
+                    if should_refresh_token(token_updated_at, token_refresh_threshold_days):
+                        print(f"   🔑 Token is old, refreshing proactively...")
+                        if proactive_refresh_token(merchant_id):
+                            refreshed_tokens += 1
+                            print(f"   ✅ Token refreshed for {merchant_name}")
+                            time.sleep(2)  # Brief pause after token refresh
+                        else:
+                            print(f"   ❌ Token refresh failed for {merchant_name}")
+                
+                # Step 2: Check if we need to sync customers
                 should_sync = True
                 days_since_sync = "Never"
                 
@@ -758,16 +834,17 @@ def background_sync():
                         days_since_sync = (datetime.now() - last_sync_date.replace(tzinfo=None)).days
                         should_sync = days_since_sync >= sync_threshold_days
                         
-                        print(f"   Last synced: {days_since_sync} days ago")
+                        print(f"   📅 Last synced: {days_since_sync} days ago")
                     except Exception as e:
-                        print(f"   Error parsing last sync date: {e}")
+                        print(f"   ⚠️ Error parsing last sync date: {e}")
                         should_sync = True
                 else:
-                    print(f"   Last synced: Never")
+                    print(f"   📅 Last synced: Never")
                 
+                # Step 3: Sync customers if needed
                 if should_sync:
-                    print(f"   ⏳ Syncing {merchant_name}...")
-                    success = sync_merchant_customers(merchant_id, days_back=365)  # Last year only
+                    print(f"   ⏳ Syncing customers for {merchant_name}...")
+                    success = sync_merchant_customers(merchant_id, days_back=365)
                     
                     if success:
                         synced_count += 1
@@ -784,12 +861,13 @@ def background_sync():
             
             # Summary
             sync_duration = datetime.now() - sync_start_time
-            print(f"\n📈 Sync cycle complete in {sync_duration.total_seconds():.1f} seconds:")
-            print(f"   ✅ Synced: {synced_count}")
-            print(f"   ⏭️  Skipped: {skipped_count}")
-            print(f"   ❌ Failed: {failed_count}")
+            print(f"\n📈 Background cycle complete in {sync_duration.total_seconds():.1f} seconds:")
+            print(f"   🔑 Tokens refreshed: {refreshed_tokens}")
+            print(f"   ✅ Customers synced: {synced_count}")
+            print(f"   ⏭️  Syncs skipped: {skipped_count}")
+            print(f"   ❌ Sync failures: {failed_count}")
             
-            # Sleep until next sync
+            # Sleep until next cycle
             sleep_hours = sync_interval_hours
             next_sync = datetime.now() + timedelta(hours=sleep_hours)
             print(f"\n💤 Sleeping for {sleep_hours} hours until {next_sync.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1388,7 +1466,7 @@ def list_merchants():
 
 @app.route('/api/cron-sync')
 def cron_sync():
-    """External cron sync endpoint"""
+    """External cron sync endpoint with proactive token refresh"""
     # Verify authorization
     auth_token = request.headers.get('Authorization')
     expected_token = f"Bearer {os.environ.get('CRON_TOKEN')}"
@@ -1396,17 +1474,31 @@ def cron_sync():
     if auth_token != expected_token:
         return jsonify({'error': 'Unauthorized'}), 401
     
-    print(f"🤖 Cron sync triggered at {datetime.now().isoformat()}")
+    print(f"🤖 Enhanced cron sync triggered at {datetime.now().isoformat()}")
     
     merchants = get_all_active_merchants()
     results = []
     synced_count = 0
+    refreshed_count = 0
     
     for merchant in merchants:
         merchant_id = merchant['merchant_id']
         merchant_name = merchant.get('merchant_name', 'Unknown')
         last_sync = merchant.get('last_sync')
         
+        # Step 1: Check if token needs refresh
+        tokens = get_tokens_from_sheets(merchant_id)
+        if tokens:
+            token_updated_at = tokens.get('updated_at')
+            if should_refresh_token(token_updated_at, threshold_days=25):
+                print(f"🔑 Proactively refreshing token for {merchant_name}")
+                if proactive_refresh_token(merchant_id):
+                    refreshed_count += 1
+                    results.append(f"🔑 {merchant_name} (token refreshed)")
+                else:
+                    results.append(f"🔑❌ {merchant_name} (token refresh failed)")
+        
+        # Step 2: Check if sync needed
         if should_sync_merchant(last_sync):
             print(f"🔄 Syncing {merchant_name} ({merchant_id})")
             success = sync_merchant_customers(merchant_id, days_back=365)
@@ -1422,6 +1514,7 @@ def cron_sync():
     return jsonify({
         'status': 'completed',
         'synced_count': synced_count,
+        'refreshed_tokens': refreshed_count,
         'total_merchants': len(merchants),
         'results': results,
         'timestamp': datetime.now().isoformat()
