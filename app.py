@@ -15,7 +15,7 @@ app = Flask(__name__)
 
 # Google Sheets setup
 def get_google_sheets_client():
-    """Initialize Google Sheets client using service account credentials"""
+    """Initialize Google Sheets client using service account credentials - fixed deprecation"""
     try:
         creds_json = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
         if not creds_json:
@@ -26,7 +26,11 @@ def get_google_sheets_client():
             creds_dict,
             scopes=['https://www.googleapis.com/auth/spreadsheets']
         )
+        
+        # Use the updated gspread syntax
+        import gspread
         return gspread.authorize(creds)
+        
     except Exception as e:
         print(f"Error initializing Google Sheets: {e}")
         return None
@@ -514,46 +518,33 @@ def fetch_customers_fallback(merchant_id, access_token, use_production=False, da
     return all_customers
 
 def save_customer_data(merchant_id, customers):
-    """Save customer data to a separate sheet with comprehensive error handling"""
-    print(f"💾 Starting to save {len(customers)} customers for merchant {merchant_id}")
-    
+    """Save customer data to a separate sheet with fixed range calculation"""
     try:
+        print(f"💾 Starting to save {len(customers)} customers for {merchant_id}")
+        
         gc = get_google_sheets_client()
         if not gc:
-            print("❌ Could not connect to Google Sheets client")
+            print("❌ Could not connect to Google Sheets")
             return False
         
         spreadsheet_id = os.environ.get('GOOGLE_SHEETS_ID')
-        if not spreadsheet_id:
-            print("❌ GOOGLE_SHEETS_ID environment variable not set")
-            return False
-        
-        print(f"📊 Using spreadsheet ID: {spreadsheet_id}")
         
         # Create or get customer data sheet for this merchant
         sheet_name = f"customers_{merchant_id}"
-        print(f"📝 Working with sheet: {sheet_name}")
-        
         try:
             spreadsheet = gc.open_by_key(spreadsheet_id)
-            print(f"✅ Successfully opened spreadsheet: {spreadsheet.title}")
-            
             try:
                 sheet = spreadsheet.worksheet(sheet_name)
-                print(f"📋 Found existing sheet: {sheet_name}")
                 sheet.clear()  # Clear existing data
-                print(f"🧹 Cleared existing data in {sheet_name}")
+                print(f"📝 Cleared existing data in sheet {sheet_name}")
             except:
-                print(f"📝 Creating new sheet: {sheet_name}")
+                print(f"📝 Creating new sheet {sheet_name}")
                 sheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=30)
-                print(f"✅ Successfully created sheet: {sheet_name}")
-                
         except Exception as sheet_error:
             print(f"❌ Error accessing/creating sheet: {sheet_error}")
-            traceback.print_exc()
             return False
         
-        # Headers - including invoice fields
+        # Headers - including invoice fields (27 columns total)
         headers = [
             'customer_id', 'given_name', 'family_name', 'company_name', 'nickname',
             'email_address', 'phone_number', 'address_line_1', 'address_line_2', 
@@ -563,19 +554,16 @@ def save_customer_data(merchant_id, customers):
             'latest_invoice_id', 'sale_or_service_date', 'due_date', 'invoice_status', 'invoice_amount'
         ]
         
-        print(f"📊 Preparing data with {len(headers)} columns")
+        print(f"📊 Headers count: {len(headers)} columns")
         
         # Prepare data rows
         rows = [headers]
         processed_customers = 0
-        customers_with_invoices = 0
         
         for customer in customers:
             try:
                 # Get latest invoice data for this customer if available
                 latest_invoice = customer.get('latest_invoice', {})
-                if latest_invoice:
-                    customers_with_invoices += 1
                 
                 row = [
                     customer.get('id', ''),
@@ -608,6 +596,8 @@ def save_customer_data(merchant_id, customers):
                     latest_invoice.get('invoice_status', ''),
                     latest_invoice.get('invoice_amount', '')
                 ]
+                
+                print(f"📝 Row {processed_customers + 1}: {len(row)} columns for customer {customer.get('given_name', 'Unknown')}")
                 rows.append(row)
                 processed_customers += 1
                 
@@ -616,31 +606,44 @@ def save_customer_data(merchant_id, customers):
                 continue
         
         print(f"📊 Processed {processed_customers} customers successfully")
-        print(f"🧾 {customers_with_invoices} customers have invoice data")
         
-        # Batch update for better performance
+        # Calculate correct range based on actual column count
         if len(rows) > 1:
             try:
-                range_name = f'A1:Y{len(rows)}'
-                print(f"📤 Updating Google Sheets range: {range_name}")
+                num_columns = len(headers)  # Should be 27
+                num_rows = len(rows)
                 
-                # Use batch update for better performance
-                sheet.update(range_name, rows, value_input_option='USER_ENTERED')
+                # Convert column number to letter (1=A, 2=B, ..., 27=AA)
+                def get_column_letter(col_num):
+                    result = ""
+                    while col_num > 0:
+                        col_num -= 1
+                        result = chr(col_num % 26 + ord('A')) + result
+                        col_num //= 26
+                    return result
+                
+                end_column = get_column_letter(num_columns)
+                range_name = f'A1:{end_column}{num_rows}'
+                
+                print(f"📤 Updating Google Sheets range: {range_name} ({num_columns} columns, {num_rows} rows)")
+                
+                # Use the updated gspread syntax to avoid deprecation warnings
+                sheet.update(values=rows, range_name=range_name)
                 
                 print(f"✅ Successfully saved {len(rows)-1} customer records to sheet {sheet_name}")
-                print(f"🎉 Data save completed successfully!")
                 return True
                 
             except Exception as update_error:
                 print(f"❌ Error updating Google Sheets: {update_error}")
-                traceback.print_exc()
+                print(f"Debug info - Columns: {len(headers)}, Rows: {len(rows)}, Range attempted: {range_name}")
                 return False
         else:
             print(f"⚠️ No customer data to save for {merchant_id}")
             return False
             
     except Exception as e:
-        print(f"❌ Critical error in save_customer_data: {e}")
+        print(f"❌ Error saving customer data: {e}")
+        import traceback
         traceback.print_exc()
         return False
 
