@@ -904,8 +904,8 @@ def signin():
     if not redirect_uri:
         return 'Error: SQUARE_REDIRECT_URI not configured', 500
     
-    # Updated scope to include invoices
-    scope = 'CUSTOMERS_READ MERCHANT_PROFILE_READ INVOICES_READ'
+    # Updated scope to include invoices and orders and payments
+    scope = 'CUSTOMERS_READ MERCHANT_PROFILE_READ INVOICES_READ ORDERS_READ PAYMENTS_READ'
     
     auth_url = (f'{base_url}/oauth2/authorize'
                f'?client_id={client_id}'
