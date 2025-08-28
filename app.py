@@ -442,7 +442,6 @@ class SquareSync:
         
         return False
     
-    # Add this method to your SquareSync class
     def sync_merchant(self, merchant_id):
         """Complete sync process for one merchant"""
         print(f"🚀 Starting sync for {merchant_id}")
@@ -461,14 +460,14 @@ class SquareSync:
         
         print(f"✅ Got {len(customers)} customers")
         
-        # Fetch invoices
+        # Fetch invoices - THIS WAS MISSING!
         customer_ids = [c.get('id') for c in customers if c.get('id')]
         print(f"🔍 About to fetch invoices for {len(customer_ids)} customer IDs")
         
         invoices = self.fetch_invoices(tokens['access_token'], customer_ids)
         print(f"🔍 fetch_invoices returned: {len(invoices) if invoices else 0} mappings")
         
-        # Merge invoice data
+        # Merge invoice data - THIS WAS MISSING!
         customers_with_invoices = 0
         for customer in customers:
             customer_id = customer.get('id')
@@ -476,8 +475,6 @@ class SquareSync:
                 customer['latest_invoice'] = invoices[customer_id]
                 customers_with_invoices += 1
                 print(f"✅ Added invoice to customer {customer_id}")
-            # else:
-            #     customer['latest_invoice'] = {}  # Don't add empty data
         
         print(f"🔗 Final: {customers_with_invoices} customers have invoice data")
         
