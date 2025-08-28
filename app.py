@@ -272,12 +272,31 @@ class SquareSync:
         
         print(f"📄 Fetching invoices for {len(customer_ids)} customers")
         
-        # Square Invoice API requires a query parameter
+        # First, get merchant locations (required for invoice search)
+        locations_response = self._make_square_request('v2/locations', access_token)
+        
+        if not locations_response or locations_response.status_code != 200:
+            print(f"❌ Failed to get locations: {locations_response.status_code if locations_response else 'No response'}")
+            return {}
+        
+        locations_data = locations_response.json()
+        locations = locations_data.get('locations', [])
+        
+        if not locations:
+            print("❌ No locations found")
+            return {}
+        
+        # Get location IDs
+        location_ids = [loc.get('id') for loc in locations if loc.get('id')]
+        print(f"✅ Found {len(location_ids)} locations: {location_ids}")
+        
+        # Now search invoices with proper query structure
         search_data = {
             'limit': 100,
             'query': {
-                # Empty filter gets all invoices
-                'filter': {}
+                'filter': {
+                    'location_ids': location_ids
+                }
             }
         }
         
