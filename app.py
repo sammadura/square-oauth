@@ -920,6 +920,85 @@ def health():
         'merchants_connected': len(sync.get_all_merchants())
     })
 
+@app.route('/debug-sync/<merchant_id>')
+def debug_sync(merchant_id):
+    """Debug sync with web output"""
+    
+    output = []
+    
+    try:
+        output.append(f"🚀 Debug sync for {merchant_id}")
+        
+        # Get tokens
+        tokens = sync.get_tokens(merchant_id)
+        if not tokens:
+            output.append(f"❌ No tokens found")
+            return "<pre>" + "\n".join(output) + "</pre>"
+        
+        output.append(f"✅ Found tokens")
+        
+        # Test invoice API directly
+        output.append(f"📄 Testing invoice API...")
+        response = sync._make_square_request('v2/invoices/search', tokens['access_token'], 'POST', {'limit': 10})
+        
+        if not response:
+            output.append("❌ No response from invoice API")
+        elif response.status_code != 200:
+            output.append(f"❌ Invoice API error: {response.status_code}")
+            output.append(f"Response: {response.text}")
+        else:
+            data = response.json()
+            invoices = data.get('invoices', [])
+            output.append(f"✅ Invoice API works! Found {len(invoices)} invoices")
+            
+            if invoices:
+                first_invoice = invoices[0]
+                output.append(f"\n📋 First invoice structure:")
+                
+                # Show key fields
+                output.append(f"  ID: {first_invoice.get('id', 'MISSING')}")
+                output.append(f"  Status: {first_invoice.get('status', 'MISSING')}")
+                output.append(f"  Created: {first_invoice.get('created_at', 'MISSING')}")
+                
+                # Check for customer ID in different places
+                primary_recipient = first_invoice.get('primary_recipient', {})
+                output.append(f"  Primary recipient: {primary_recipient}")
+                
+                if 'primary_recipient' in first_invoice:
+                    customer_id = primary_recipient.get('customer_id')
+                    output.append(f"  Customer ID: {customer_id}")
+                
+                # Check order data
+                order = first_invoice.get('order', {})
+                if order:
+                    output.append(f"  Order exists: Yes")
+                    total_money = order.get('total_money', {})
+                    output.append(f"  Amount: {total_money.get('amount', 'MISSING')}")
+                else:
+                    output.append(f"  Order exists: No")
+                
+                output.append(f"\n🔍 All invoice keys: {list(first_invoice.keys())}")
+            else:
+                output.append("❌ No invoices in response")
+        
+        # Test with a few customers
+        customers = sync.fetch_customers(merchant_id, tokens['access_token'])
+        if customers:
+            output.append(f"\n👥 Found {len(customers)} customers")
+            
+            # Show first few customer IDs
+            customer_ids = [c.get('id') for c in customers[:5] if c.get('id')]
+            output.append(f"First 5 customer IDs: {customer_ids}")
+        else:
+            output.append(f"\n❌ No customers found")
+    
+    except Exception as e:
+        output.append(f"❌ Exception: {str(e)}")
+        import traceback
+        output.append(f"Traceback: {traceback.format_exc()}")
+    
+    return "<pre>" + "\n".join(output) + "</pre>"
+
 # Expose sync methods for backwards compatibility
 def get_tokens_from_sheets(merchant_id):
     return sync.get_tokens(merchant_id)
