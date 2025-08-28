@@ -473,35 +473,86 @@ def home():
 
 @app.route('/signin')
 def signin():
-    """Initiate Square OAuth"""
+    """Initiate Square OAuth with comprehensive debugging"""
     client_id = os.environ.get('SQUARE_CLIENT_ID')
     redirect_uri = os.environ.get('SQUARE_REDIRECT_URI')
     
+    print(f"=== SIGNIN DEBUG ===")
+    print(f"Client ID: {client_id[:10] + '...' if client_id else 'None'}")
+    print(f"Redirect URI: {redirect_uri}")
+    print(f"Request URL: {request.url}")
+    print(f"Request method: {request.method}")
+    
     if not client_id or not redirect_uri:
-        return 'Error: Missing Square configuration', 500
+        error_msg = f'Error: Missing Square configuration - Client ID: {"SET" if client_id else "MISSING"}, Redirect URI: {"SET" if redirect_uri else "MISSING"}'
+        print(f"ERROR: {error_msg}")
+        return error_msg, 500
     
     scope = 'CUSTOMERS_READ MERCHANT_PROFILE_READ INVOICES_READ ORDERS_READ PAYMENTS_READ APPOINTMENTS_READ'
     auth_url = (f'https://connect.squareupsandbox.com/oauth2/authorize'
                f'?client_id={client_id}&redirect_uri={redirect_uri}'
                f'&scope={scope}&response_type=code')
     
+    print(f"Auth URL: {auth_url}")
+    print(f"About to redirect...")
+    
     return redirect(auth_url)
 
+# Also add some debugging to the OAuth callback
 @app.route('/oauth2callback')
 def oauth2callback():
-    """Handle Square OAuth callback"""
+    """Handle Square OAuth callback with debugging"""
+    print(f"=== OAUTH CALLBACK DEBUG ===")
+    print(f"Full URL: {request.url}")
+    print(f"Args: {request.args}")
+    
     code = request.args.get('code')
     error = request.args.get('error')
     
+    print(f"Code: {code[:10] + '...' if code else 'None'}")
+    print(f"Error: {error}")
+    
     if error:
-        return f'Authorization denied: {error}', 400
+        print(f"Authorization denied: {error}")
+        return f'''
+        <div style="max-width: 600px; margin: 50px auto; padding: 30px; background: #f8d7da; 
+             border: 1px solid #f5c6cb; border-radius: 8px; font-family: Arial;">
+            <h1 style="color: #721c24;">❌ Authorization Error</h1>
+            <p><strong>Error:</strong> {error}</p>
+            <p><strong>Description:</strong> {request.args.get('error_description', 'No description provided')}</p>
+            <a href="/" style="background: #007bff; color: white; padding: 10px 20px; 
+               text-decoration: none; border-radius: 5px;">← Back to Home</a>
+        </div>
+        ''', 400
+        
     if not code:
-        return 'Error: No authorization code', 400
+        print("ERROR: No authorization code received")
+        return '''
+        <div style="max-width: 600px; margin: 50px auto; padding: 30px; background: #f8d7da; 
+             border: 1px solid #f5c6cb; border-radius: 8px; font-family: Arial;">
+            <h1 style="color: #721c24;">❌ Missing Authorization Code</h1>
+            <p>No authorization code was received from Square.</p>
+            <p>This could mean:</p>
+            <ul>
+                <li>The user denied permission</li>
+                <li>There's an issue with the redirect URI configuration</li>
+                <li>Network connectivity problems</li>
+            </ul>
+            <a href="/signin" style="background: #28a745; color: white; padding: 10px 20px; 
+               text-decoration: none; border-radius: 5px;">Try Again</a>
+            <a href="/" style="background: #007bff; color: white; padding: 10px 20px; 
+               text-decoration: none; border-radius: 5px; margin-left: 10px;">← Back to Home</a>
+        </div>
+        ''', 400
     
     # Exchange code for tokens
     client_id = os.environ.get('SQUARE_CLIENT_ID')
     client_secret = os.environ.get('SQUARE_CLIENT_SECRET')
     redirect_uri = os.environ.get('SQUARE_REDIRECT_URI')
+    
+    print(f"Exchanging code for tokens...")
+    print(f"Client ID: {client_id[:10] + '...' if client_id else 'None'}")
+    print(f"Client Secret: {'SET' if client_secret else 'MISSING'}")
     
     response = requests.post('https://connect.squareupsandbox.com/oauth2/token', data={
         'client_id': client_id,
@@ -511,14 +562,29 @@ def oauth2callback():
         'redirect_uri': redirect_uri
     })
     
+    print(f"Token exchange response status: {response.status_code}")
+    print(f"Token exchange response: {response.text}")
+    
     if response.status_code != 200:
-        return f'Authorization failed: {response.text}', response.status_code
+        return f'''
+        <div style="max-width: 600px; margin: 50px auto; padding: 30px; background: #f8d7da; 
+             border: 1px solid #f5c6cb; border-radius: 8px; font-family: Arial;">
+            <h1 style="color: #721c24;">❌ Token Exchange Failed</h1>
+            <p><strong>Status:</strong> {response.status_code}</p>
+            <p><strong>Response:</strong> {response.text}</p>
+            <a href="/signin" style="background: #28a745; color: white; padding: 10px 20px; 
+               text-decoration: none; border-radius: 5px;">Try Again</a>
+        </div>
+        ''', response.status_code
     
     token_data = response.json()
     merchant_id = token_data.get('merchant_id')
     access_token = token_data.get('access_token')
     refresh_token = token_data.get('refresh_token')
     
+    print(f"Successfully got tokens for merchant: {merchant_id}")
+    
+    # Continue with the rest of your existing oauth2callback logic...
     # Get merchant name
     merchant_name = "Unknown"
     merchant_response = sync._make_square_request('v2/merchants', access_token)
