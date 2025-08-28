@@ -60,7 +60,7 @@ class SquareSync:
     
     def _make_square_request(self, endpoint, access_token, method='GET', data=None):
         """Make Square API request with consistent error handling"""
-        base_url = 'https://connect.squareupsandbox.com'
+        base_url = 'https://connect.squareup.com'
         headers = {
             'Authorization': f'Bearer {access_token}',
             'Content-Type': 'application/json',
@@ -155,7 +155,7 @@ class SquareSync:
         client_id = os.environ.get('SQUARE_CLIENT_ID')
         client_secret = os.environ.get('SQUARE_CLIENT_SECRET')
         
-        response = requests.post('https://connect.squareupsandbox.com/oauth2/token', data={
+        response = requests.post('https://connect.squareup.com/oauth2/token', data={
             'client_id': client_id,
             'client_secret': client_secret,
             'refresh_token': tokens['refresh_token'],
@@ -489,7 +489,7 @@ def signin():
         return error_msg, 500
     
     scope = 'CUSTOMERS_READ MERCHANT_PROFILE_READ INVOICES_READ ORDERS_READ PAYMENTS_READ APPOINTMENTS_READ'
-    auth_url = (f'https://connect.squareupsandbox.com/oauth2/authorize'
+    auth_url = (f'https://connect.squareup.com/oauth2/authorize'
                f'?client_id={client_id}&redirect_uri={redirect_uri}'
                f'&scope={scope}&response_type=code')
     
@@ -554,7 +554,7 @@ def oauth2callback():
     print(f"Client ID: {client_id[:10] + '...' if client_id else 'None'}")
     print(f"Client Secret: {'SET' if client_secret else 'MISSING'}")
     
-    response = requests.post('https://connect.squareupsandbox.com/oauth2/token', data={
+    response = requests.post('https://connect.squareup.com/oauth2/token', data={
         'client_id': client_id,
         'client_secret': client_secret,
         'code': code,
