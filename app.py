@@ -266,53 +266,88 @@ class SquareSync:
         return all_customers
     
     def fetch_invoices(self, access_token, customer_ids):
-        """Fetch invoice data for customers"""
+        """Fetch invoice data for customers with detailed debugging"""
         if not customer_ids:
+            print("❌ No customer IDs provided")
             return {}
         
         print(f"📄 Fetching invoices for {len(customer_ids)} customers")
+        print(f"🔍 First few customer IDs: {customer_ids[:3]}")
         
         all_invoices = []
         cursor = None
+        page_count = 0
         
         # Fetch ALL invoices with pagination
         while True:
+            page_count += 1
             search_data = {'limit': 100}
             if cursor:
                 search_data['cursor'] = cursor
             
+            print(f"📄 Fetching invoice page {page_count}...")
             response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
             
-            if not response or response.status_code != 200:
-                print("⚠️ Invoice fetch failed - continuing without invoice data")
+            if not response:
+                print("❌ No response from invoice API")
+                break
+                
+            if response.status_code != 200:
+                print(f"❌ Invoice API error: {response.status_code}")
+                print(f"❌ Response text: {response.text}")
                 break
             
             data = response.json()
             invoices = data.get('invoices', [])
             all_invoices.extend(invoices)
             
+            print(f"✅ Got {len(invoices)} invoices on page {page_count}")
+            
+            # Debug: Show structure of first invoice
+            if invoices and page_count == 1:
+                print(f"🔍 First invoice structure:")
+                first_invoice = invoices[0]
+                print(f"  ID: {first_invoice.get('id', 'MISSING')}")
+                print(f"  Status: {first_invoice.get('status', 'MISSING')}")
+                print(f"  Created: {first_invoice.get('created_at', 'MISSING')}")
+                print(f"  Primary recipient: {first_invoice.get('primary_recipient', 'MISSING')}")
+                if 'primary_recipient' in first_invoice:
+                    recipient = first_invoice['primary_recipient']
+                    print(f"    Customer ID: {recipient.get('customer_id', 'MISSING')}")
+                print(f"  Order: {first_invoice.get('order', 'MISSING')}")
+            
             cursor = data.get('cursor')
             if not cursor:
                 break
             
-            # Safety limit to prevent infinite loops
-            if len(all_invoices) > 10000:
+            # Safety limit
+            if len(all_invoices) > 5000:
                 print(f"⚠️ Hit safety limit at {len(all_invoices)} invoices")
                 break
         
-        print(f"✅ Found {len(all_invoices)} total invoices")
+        print(f"✅ Found {len(all_invoices)} total invoices across {page_count} pages")
         
         # Map latest invoice per customer
         customer_invoices = {}
-        customer_id_set = set(customer_ids)  # For faster lookup
+        customer_id_set = set(customer_ids)
+        matched_count = 0
         
-        for invoice in all_invoices:
+        print(f"🔍 Matching invoices to customers...")
+        
+        for i, invoice in enumerate(all_invoices):
             # Get customer ID from invoice
-            customer_id = invoice.get('primary_recipient', {}).get('customer_id')
+            primary_recipient = invoice.get('primary_recipient', {})
+            customer_id = primary_recipient.get('customer_id')
+            
+            # Debug first few matches
+            if i < 5:
+                print(f"  Invoice {i+1}: customer_id = {customer_id}, in our list = {customer_id in customer_id_set if customer_id else False}")
             
             if customer_id and customer_id in customer_id_set:
                 # Only keep the first (most recent) invoice per customer
                 if customer_id not in customer_invoices:
+                    matched_count += 1
+                    
                     # Extract key invoice fields
                     payment_requests = invoice.get('payment_requests', [])
                     order = invoice.get('order', {})
@@ -325,10 +360,20 @@ class SquareSync:
                         'invoice_status': invoice.get('status', ''),
                         'invoice_amount': str(total_money.get('amount', ''))
                     }
+                    
+                    # Debug first match
+                    if matched_count == 1:
+                        print(f"🎯 First match details:")
+                        print(f"  Customer ID: {customer_id}")
+                        print(f"  Invoice ID: {invoice.get('id', 'MISSING')}")
+                        print(f"  Status: {invoice.get('status', 'MISSING')}")
+                        print(f"  Amount: {total_money.get('amount', 'MISSING')}")
         
-        print(f"✅ Mapped invoices for {len(customer_invoices)} customers")
+        print(f"✅ Final result: Mapped invoices for {len(customer_invoices)} out of {len(customer_ids)} customers")
+        print(f"📊 Match rate: {len(customer_invoices)/len(customer_ids)*100:.1f}%")
+        
         return customer_invoices
-    
+
     def save_customer_data(self, merchant_id, customers):
         """Save customer data to Google Sheets"""
         sheet_name = f"customers_{merchant_id}"
@@ -423,7 +468,7 @@ class SquareSync:
         return False
     
     def sync_merchant(self, merchant_id):
-        """Complete sync process for one merchant"""
+        """Complete sync process for one merchant with debugging"""
         print(f"🚀 Starting sync for {merchant_id}")
         
         # Get tokens
@@ -438,25 +483,57 @@ class SquareSync:
             print(f"❌ No customers fetched for {merchant_id}")
             return False
         
+        print(f"✅ Fetched {len(customers)} customers")
+        
         # Fetch invoices
         customer_ids = [c.get('id') for c in customers if c.get('id')]
+        print(f"🔍 Customer IDs extracted: {len(customer_ids)} valid IDs")
+        print(f"🔍 First few customer IDs: {customer_ids[:3]}")
+        
         invoices = self.fetch_invoices(tokens['access_token'], customer_ids)
+        print(f"📄 Invoice fetch returned: {len(invoices)} invoice mappings")
+        
+        # Debug: Show some invoice data
+        if invoices:
+            first_customer_with_invoice = next(iter(invoices))
+            first_invoice = invoices[first_customer_with_invoice]
+            print(f"🎯 Sample invoice data:")
+            print(f"  Customer: {first_customer_with_invoice}")
+            print(f"  Invoice: {first_invoice}")
         
         # Merge invoice data
+        customers_with_invoices = 0
         for customer in customers:
             customer_id = customer.get('id')
             if customer_id and customer_id in invoices:
                 customer['latest_invoice'] = invoices[customer_id]
+                customers_with_invoices += 1
+            else:
+                # Ensure empty invoice data for customers without invoices
+                customer['latest_invoice'] = {
+                    'id': '',
+                    'sale_or_service_date': '',
+                    'due_date': '',
+                    'invoice_status': '',
+                    'invoice_amount': ''
+                }
+        
+        print(f"🔗 Merged invoice data for {customers_with_invoices} out of {len(customers)} customers")
+        
+        # Debug: Check first customer with merged data
+        if customers:
+            first_customer = customers[0]
+            print(f"🔍 First customer invoice data: {first_customer.get('latest_invoice', 'MISSING')}")
         
         # Save data
         if self.save_customer_data(merchant_id, customers):
             self.update_sync_status(merchant_id, len(customers))
-            print(f"✅ Sync complete for {merchant_id}: {len(customers)} customers")
+            print(f"✅ Sync complete for {merchant_id}: {len(customers)} customers, {customers_with_invoices} with invoices")
             return True
         
         print(f"❌ Failed to save data for {merchant_id}")
         return False
-    
+
     def should_sync(self, last_sync):
         """Check if merchant needs syncing"""
         if not last_sync:
