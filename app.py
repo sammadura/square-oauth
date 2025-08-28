@@ -480,7 +480,7 @@ def signin():
     if not client_id or not redirect_uri:
         return 'Error: Missing Square configuration', 500
     
-    scope = 'CUSTOMERS_READ MERCHANT_PROFILE_READ INVOICES_READ'
+    scope = 'CUSTOMERS_READ MERCHANT_PROFILE_READ INVOICES_READ ORDERS_READ PAYMENTS_READ APPOINTMENTS_READ'
     auth_url = (f'https://connect.squareupsandbox.com/oauth2/authorize'
                f'?client_id={client_id}&redirect_uri={redirect_uri}'
                f'&scope={scope}&response_type=code')
