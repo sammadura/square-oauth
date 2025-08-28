@@ -272,12 +272,19 @@ class SquareSync:
         
         print(f"📄 Fetching invoices for {len(customer_ids)} customers")
         
-        # Try to get all invoices without filtering first
+        # Square Invoice API requires a query parameter
+        search_data = {
+            'limit': 100,
+            'query': {
+                # Empty filter gets all invoices
+                'filter': {}
+            }
+        }
+        
         all_invoices = []
         cursor = None
         
         while True:
-            search_data = {'limit': 100}
             if cursor:
                 search_data['cursor'] = cursor
             
@@ -285,6 +292,8 @@ class SquareSync:
             
             if not response or response.status_code != 200:
                 print(f"⚠️ Invoice fetch failed: {response.status_code if response else 'No response'}")
+                if response:
+                    print(f"Error details: {response.text}")
                 return {}
             
             data = response.json()
