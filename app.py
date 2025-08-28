@@ -266,112 +266,87 @@ class SquareSync:
         return all_customers
     
     def fetch_invoices(self, access_token, customer_ids):
-        """Fetch invoice data for customers with detailed debugging"""
+        """Fetch invoice data for customers"""
         if not customer_ids:
-            print("❌ No customer IDs provided")
             return {}
         
         print(f"📄 Fetching invoices for {len(customer_ids)} customers")
-        print(f"🔍 First few customer IDs: {customer_ids[:3]}")
         
+        # Try to get all invoices without filtering first
         all_invoices = []
         cursor = None
-        page_count = 0
         
-        # Fetch ALL invoices with pagination
         while True:
-            page_count += 1
             search_data = {'limit': 100}
             if cursor:
                 search_data['cursor'] = cursor
             
-            print(f"📄 Fetching invoice page {page_count}...")
             response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
             
-            if not response:
-                print("❌ No response from invoice API")
-                break
-                
-            if response.status_code != 200:
-                print(f"❌ Invoice API error: {response.status_code}")
-                print(f"❌ Response text: {response.text}")
-                break
+            if not response or response.status_code != 200:
+                print(f"⚠️ Invoice fetch failed: {response.status_code if response else 'No response'}")
+                return {}
             
             data = response.json()
             invoices = data.get('invoices', [])
             all_invoices.extend(invoices)
-            
-            print(f"✅ Got {len(invoices)} invoices on page {page_count}")
-            
-            # Debug: Show structure of first invoice
-            if invoices and page_count == 1:
-                print(f"🔍 First invoice structure:")
-                first_invoice = invoices[0]
-                print(f"  ID: {first_invoice.get('id', 'MISSING')}")
-                print(f"  Status: {first_invoice.get('status', 'MISSING')}")
-                print(f"  Created: {first_invoice.get('created_at', 'MISSING')}")
-                print(f"  Primary recipient: {first_invoice.get('primary_recipient', 'MISSING')}")
-                if 'primary_recipient' in first_invoice:
-                    recipient = first_invoice['primary_recipient']
-                    print(f"    Customer ID: {recipient.get('customer_id', 'MISSING')}")
-                print(f"  Order: {first_invoice.get('order', 'MISSING')}")
+            print(f"📄 Got {len(invoices)} invoices (total: {len(all_invoices)})")
             
             cursor = data.get('cursor')
             if not cursor:
                 break
             
-            # Safety limit
-            if len(all_invoices) > 5000:
-                print(f"⚠️ Hit safety limit at {len(all_invoices)} invoices")
+            if len(all_invoices) > 1000:  # Safety limit
                 break
         
-        print(f"✅ Found {len(all_invoices)} total invoices across {page_count} pages")
+        print(f"✅ Total invoices found: {len(all_invoices)}")
         
-        # Map latest invoice per customer
+        # If no invoices found, return empty dict
+        if not all_invoices:
+            print("❌ No invoices found at all")
+            return {}
+        
+        # Debug first invoice structure
+        first_invoice = all_invoices[0]
+        print(f"🔍 First invoice keys: {list(first_invoice.keys())}")
+        
+        # Map invoices to customers
         customer_invoices = {}
         customer_id_set = set(customer_ids)
-        matched_count = 0
         
-        print(f"🔍 Matching invoices to customers...")
-        
-        for i, invoice in enumerate(all_invoices):
-            # Get customer ID from invoice
-            primary_recipient = invoice.get('primary_recipient', {})
-            customer_id = primary_recipient.get('customer_id')
+        for invoice in all_invoices:
+            # Try multiple ways to get customer ID
+            customer_id = None
             
-            # Debug first few matches
-            if i < 5:
-                print(f"  Invoice {i+1}: customer_id = {customer_id}, in our list = {customer_id in customer_id_set if customer_id else False}")
+            # Method 1: primary_recipient
+            if 'primary_recipient' in invoice:
+                customer_id = invoice['primary_recipient'].get('customer_id')
             
-            if customer_id and customer_id in customer_id_set:
-                # Only keep the first (most recent) invoice per customer
-                if customer_id not in customer_invoices:
-                    matched_count += 1
-                    
-                    # Extract key invoice fields
-                    payment_requests = invoice.get('payment_requests', [])
-                    order = invoice.get('order', {})
-                    total_money = order.get('total_money', {})
-                    
-                    customer_invoices[customer_id] = {
-                        'id': invoice.get('id', ''),
-                        'sale_or_service_date': invoice.get('created_at', ''),
-                        'due_date': payment_requests[0].get('due_date', '') if payment_requests else '',
-                        'invoice_status': invoice.get('status', ''),
-                        'invoice_amount': str(total_money.get('amount', ''))
-                    }
-                    
-                    # Debug first match
-                    if matched_count == 1:
-                        print(f"🎯 First match details:")
-                        print(f"  Customer ID: {customer_id}")
-                        print(f"  Invoice ID: {invoice.get('id', 'MISSING')}")
-                        print(f"  Status: {invoice.get('status', 'MISSING')}")
-                        print(f"  Amount: {total_money.get('amount', 'MISSING')}")
+            # Method 2: invoice_recipients
+            if not customer_id and 'invoice_recipients' in invoice:
+                recipients = invoice['invoice_recipients']
+                if recipients:
+                    customer_id = recipients[0].get('customer_id')
+            
+            # Method 3: order -> customer_id
+            if not customer_id and 'order' in invoice:
+                customer_id = invoice['order'].get('customer_id')
+            
+            if customer_id and customer_id in customer_id_set and customer_id not in customer_invoices:
+                # Extract invoice fields safely
+                payment_requests = invoice.get('payment_requests', [])
+                order = invoice.get('order', {})
+                total_money = order.get('total_money', {})
+                
+                customer_invoices[customer_id] = {
+                    'id': invoice.get('id', ''),
+                    'sale_or_service_date': invoice.get('created_at', ''),
+                    'due_date': payment_requests[0].get('due_date', '') if payment_requests else '',
+                    'invoice_status': invoice.get('status', ''),
+                    'invoice_amount': str(total_money.get('amount', 0))
+                }
         
-        print(f"✅ Final result: Mapped invoices for {len(customer_invoices)} out of {len(customer_ids)} customers")
-        print(f"📊 Match rate: {len(customer_invoices)/len(customer_ids)*100:.1f}%")
-        
+        print(f"✅ Matched {len(customer_invoices)} invoices to customers")
         return customer_invoices
 
     def save_customer_data(self, merchant_id, customers):
