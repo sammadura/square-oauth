@@ -442,8 +442,9 @@ class SquareSync:
         
         return False
     
+    # Add this method to your SquareSync class
     def sync_merchant(self, merchant_id):
-        """Complete sync process for one merchant with debugging"""
+        """Complete sync process for one merchant"""
         print(f"🚀 Starting sync for {merchant_id}")
         
         # Get tokens
@@ -458,23 +459,14 @@ class SquareSync:
             print(f"❌ No customers fetched for {merchant_id}")
             return False
         
-        print(f"✅ Fetched {len(customers)} customers")
+        print(f"✅ Got {len(customers)} customers")
         
         # Fetch invoices
         customer_ids = [c.get('id') for c in customers if c.get('id')]
-        print(f"🔍 Customer IDs extracted: {len(customer_ids)} valid IDs")
-        print(f"🔍 First few customer IDs: {customer_ids[:3]}")
+        print(f"🔍 About to fetch invoices for {len(customer_ids)} customer IDs")
         
         invoices = self.fetch_invoices(tokens['access_token'], customer_ids)
-        print(f"📄 Invoice fetch returned: {len(invoices)} invoice mappings")
-        
-        # Debug: Show some invoice data
-        if invoices:
-            first_customer_with_invoice = next(iter(invoices))
-            first_invoice = invoices[first_customer_with_invoice]
-            print(f"🎯 Sample invoice data:")
-            print(f"  Customer: {first_customer_with_invoice}")
-            print(f"  Invoice: {first_invoice}")
+        print(f"🔍 fetch_invoices returned: {len(invoices) if invoices else 0} mappings")
         
         # Merge invoice data
         customers_with_invoices = 0
@@ -483,27 +475,16 @@ class SquareSync:
             if customer_id and customer_id in invoices:
                 customer['latest_invoice'] = invoices[customer_id]
                 customers_with_invoices += 1
-            else:
-                # Ensure empty invoice data for customers without invoices
-                customer['latest_invoice'] = {
-                    'id': '',
-                    'sale_or_service_date': '',
-                    'due_date': '',
-                    'invoice_status': '',
-                    'invoice_amount': ''
-                }
+                print(f"✅ Added invoice to customer {customer_id}")
+            # else:
+            #     customer['latest_invoice'] = {}  # Don't add empty data
         
-        print(f"🔗 Merged invoice data for {customers_with_invoices} out of {len(customers)} customers")
-        
-        # Debug: Check first customer with merged data
-        if customers:
-            first_customer = customers[0]
-            print(f"🔍 First customer invoice data: {first_customer.get('latest_invoice', 'MISSING')}")
+        print(f"🔗 Final: {customers_with_invoices} customers have invoice data")
         
         # Save data
         if self.save_customer_data(merchant_id, customers):
             self.update_sync_status(merchant_id, len(customers))
-            print(f"✅ Sync complete for {merchant_id}: {len(customers)} customers, {customers_with_invoices} with invoices")
+            print(f"✅ Sync complete for {merchant_id}: {len(customers)} customers")
             return True
         
         print(f"❌ Failed to save data for {merchant_id}")
