@@ -266,31 +266,22 @@ class SquareSync:
         return all_customers
     
     def fetch_invoices(self, access_token, customer_ids):
-        """Fetch invoice data for customers"""
+        """Fetch comprehensive invoice and order data for customers"""
         if not customer_ids:
             return {}
         
-        print(f"📄 Fetching invoices for {len(customer_ids)} customers")
-        
-        # First, get merchant locations (required for invoice search)
+        # Get locations (required by Square)
         locations_response = self._make_square_request('v2/locations', access_token)
-        
         if not locations_response or locations_response.status_code != 200:
-            print(f"❌ Failed to get locations: {locations_response.status_code if locations_response else 'No response'}")
             return {}
         
-        locations_data = locations_response.json()
-        locations = locations_data.get('locations', [])
-        
+        locations = locations_response.json().get('locations', [])
         if not locations:
-            print("❌ No locations found")
             return {}
         
-        # Get location IDs
-        location_ids = [loc.get('id') for loc in locations if loc.get('id')]
-        print(f"✅ Found {len(location_ids)} locations: {location_ids}")
+        location_ids = [loc['id'] for loc in locations if loc.get('id')]
         
-        # Now search invoices with proper query structure
+        # Search invoices
         search_data = {
             'limit': 100,
             'query': {
@@ -300,85 +291,95 @@ class SquareSync:
             }
         }
         
-        all_invoices = []
-        cursor = None
-        
-        while True:
-            if cursor:
-                search_data['cursor'] = cursor
-            
-            response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
-            
-            if not response or response.status_code != 200:
-                print(f"⚠️ Invoice fetch failed: {response.status_code if response else 'No response'}")
-                if response:
-                    print(f"Error details: {response.text}")
-                return {}
-            
-            data = response.json()
-            invoices = data.get('invoices', [])
-            all_invoices.extend(invoices)
-            print(f"📄 Got {len(invoices)} invoices (total: {len(all_invoices)})")
-            
-            cursor = data.get('cursor')
-            if not cursor:
-                break
-            
-            if len(all_invoices) > 1000:  # Safety limit
-                break
-        
-        print(f"✅ Total invoices found: {len(all_invoices)}")
-        
-        # If no invoices found, return empty dict
-        if not all_invoices:
-            print("❌ No invoices found at all")
+        response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
+        if not response or response.status_code != 200:
             return {}
         
-        # Debug first invoice structure
-        first_invoice = all_invoices[0]
-        print(f"🔍 First invoice keys: {list(first_invoice.keys())}")
+        invoices = response.json().get('invoices', [])
+        if not invoices:
+            return {}
         
-        # Map invoices to customers
+        # Get order IDs from invoices
+        order_ids = []
+        invoice_to_order = {}
+        for invoice in invoices:
+            order_id = invoice.get('order_id')
+            if order_id:
+                order_ids.append(order_id)
+                invoice_to_order[order_id] = invoice
+        
+        # Fetch orders to get fulfillment details
+        order_details = {}
+        if order_ids:
+            orders_data = {'order_ids': order_ids}
+            orders_response = self._make_square_request('v2/orders/batch-retrieve', access_token, 'POST', orders_data)
+            if orders_response and orders_response.status_code == 200:
+                orders = orders_response.json().get('orders', [])
+                for order in orders:
+                    order_id = order.get('id')
+                    order_details[order_id] = order
+        
+        # Map invoices to customers with comprehensive data
         customer_invoices = {}
         customer_id_set = set(customer_ids)
         
-        for invoice in all_invoices:
-            # Try multiple ways to get customer ID
+        for invoice in invoices:
+            # Get customer ID from invoice
             customer_id = None
-            
-            # Method 1: primary_recipient
             if 'primary_recipient' in invoice:
                 customer_id = invoice['primary_recipient'].get('customer_id')
             
-            # Method 2: invoice_recipients
-            if not customer_id and 'invoice_recipients' in invoice:
-                recipients = invoice['invoice_recipients']
-                if recipients:
-                    customer_id = recipients[0].get('customer_id')
-            
-            # Method 3: order -> customer_id
-            if not customer_id and 'order' in invoice:
-                customer_id = invoice['order'].get('customer_id')
-            
             if customer_id and customer_id in customer_id_set and customer_id not in customer_invoices:
-                # Extract invoice fields safely
+                # Get associated order data
+                order_id = invoice.get('order_id')
+                order = order_details.get(order_id, {})
+                
+                # Extract fulfillment details
+                fulfillments = order.get('fulfillments', [])
+                pickup_date = ''
+                delivery_date = ''
+                pickup_notes = ''
+                delivery_notes = ''
+                
+                for fulfillment in fulfillments:
+                    pickup_details = fulfillment.get('pickup_details', {})
+                    delivery_details = fulfillment.get('delivery_details', {})
+                    
+                    if pickup_details:
+                        pickup_date = pickup_details.get('pickup_at', '')
+                        pickup_notes = pickup_details.get('note', '')
+                        
+                    if delivery_details:
+                        delivery_date = delivery_details.get('deliver_at', '')
+                        delivery_notes = delivery_details.get('note', '')
+                
+                # Extract invoice data
                 payment_requests = invoice.get('payment_requests', [])
-                order = invoice.get('order', {})
-                total_money = order.get('total_money', {})
+                order_money = invoice.get('order', {})
+                total_money = order_money.get('total_money', {})
                 
                 customer_invoices[customer_id] = {
-                    'id': invoice.get('id', ''),
-                    'sale_or_service_date': invoice.get('created_at', ''),
-                    'due_date': payment_requests[0].get('due_date', '') if payment_requests else '',
+                    'invoice_id': invoice.get('id', ''),
+                    'invoice_number': invoice.get('invoice_number', ''),
+                    'invoice_created_at': invoice.get('created_at', ''),
+                    'invoice_updated_at': invoice.get('updated_at', ''),
+                    'invoice_scheduled_at': invoice.get('scheduled_at', ''),
                     'invoice_status': invoice.get('status', ''),
-                    'invoice_amount': str(total_money.get('amount', 0))
+                    'invoice_amount': str(total_money.get('amount', 0)),
+                    'due_date': payment_requests[0].get('due_date', '') if payment_requests else '',
+                    'order_id': order_id or '',
+                    'order_created_at': order.get('created_at', ''),
+                    'order_updated_at': order.get('updated_at', ''),
+                    'pickup_date': pickup_date,
+                    'pickup_notes': pickup_notes,
+                    'delivery_date': delivery_date,
+                    'delivery_notes': delivery_notes
                 }
         
-        print(f"✅ Matched {len(customer_invoices)} invoices to customers")
         return customer_invoices
 
     def save_customer_data(self, merchant_id, customers):
-        """Save customer data to Google Sheets"""
+        """Save customer data to Google Sheets with expanded invoice fields"""
         sheet_name = f"customers_{merchant_id}"
         sheet = self._get_sheet(sheet_name)
         if not sheet:
@@ -387,14 +388,18 @@ class SquareSync:
         # Clear existing data
         sheet.clear()
         
-        # Headers
+        # Updated headers with all the invoice/order fields
         headers = [
             'customer_id', 'given_name', 'family_name', 'company_name', 'nickname',
             'email_address', 'phone_number', 'address_line_1', 'address_line_2', 
             'locality', 'administrative_district_level_1', 'postal_code', 'country',
             'created_at', 'updated_at', 'birthday', 'note', 'reference_id',
             'group_ids', 'segment_ids', 'preferences', 'version', 'sync_date',
-            'latest_invoice_id', 'sale_or_service_date', 'due_date', 'invoice_status', 'invoice_amount'
+            # Invoice and Order fields
+            'invoice_id', 'invoice_number', 'invoice_created_at', 'invoice_updated_at', 
+            'invoice_scheduled_at', 'invoice_status', 'invoice_amount', 'due_date',
+            'order_id', 'order_created_at', 'order_updated_at',
+            'pickup_date', 'pickup_notes', 'delivery_date', 'delivery_notes'
         ]
         
         # Prepare data
@@ -427,11 +432,22 @@ class SquareSync:
                 json.dumps(customer.get('preferences', {})) if customer.get('preferences') else '',
                 str(customer.get('version', '')),
                 datetime.now().isoformat(),
-                invoice.get('id', ''),
-                invoice.get('sale_or_service_date', ''),
-                invoice.get('due_date', ''),
+                # Invoice and Order data
+                invoice.get('invoice_id', ''),
+                invoice.get('invoice_number', ''),
+                invoice.get('invoice_created_at', ''),
+                invoice.get('invoice_updated_at', ''),
+                invoice.get('invoice_scheduled_at', ''),
                 invoice.get('invoice_status', ''),
-                invoice.get('invoice_amount', '')
+                invoice.get('invoice_amount', ''),
+                invoice.get('due_date', ''),
+                invoice.get('order_id', ''),
+                invoice.get('order_created_at', ''),
+                invoice.get('order_updated_at', ''),
+                invoice.get('pickup_date', ''),
+                invoice.get('pickup_notes', ''),
+                invoice.get('delivery_date', ''),
+                invoice.get('delivery_notes', '')
             ]
             rows.append(row)
         
@@ -439,10 +455,9 @@ class SquareSync:
         try:
             range_name = f'A1:{self._get_column_letter(len(headers))}{len(rows)}'
             sheet.update(values=rows, range_name=range_name)
-            print(f"✅ Saved {len(rows)-1} customers to {sheet_name}")
             return True
         except Exception as e:
-            print(f"❌ Save error: {e}")
+            print(f"Save error: {e}")
             return False
     
     def _get_column_letter(self, col_num):
