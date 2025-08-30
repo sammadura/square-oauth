@@ -17,7 +17,7 @@ SQUARE_API_VERSION = '2023-10-18'
 SYNC_INTERVAL_HOURS = 12
 SYNC_THRESHOLD_DAYS = 3
 TOKEN_REFRESH_DAYS = 25
-CUSTOMER_HISTORY_DAYS = 365
+CUSTOMER_HISTORY_DAYS = 90
 
 class SquareSync:
     def __init__(self):
@@ -175,10 +175,10 @@ class SquareSync:
         return False
     
     def fetch_customers(self, merchant_id, access_token):
-        """Fetch customers from Square with date filtering"""
+        """Fetch customers from Square with 3-month date filtering"""
         print(f"👥 Fetching customers for {merchant_id}")
         
-        # Date filter
+        # Date filter - last 3 months
         cutoff_date = (datetime.now() - timedelta(days=CUSTOMER_HISTORY_DAYS)).isoformat() + 'Z'
         
         search_data = {
@@ -266,11 +266,11 @@ class SquareSync:
         return all_customers
     
     def fetch_invoices(self, access_token, customer_ids):
-        """Fetch comprehensive invoice and order data for customers"""
+        """Fetch invoices with pagination and proper customer filtering"""
         if not customer_ids:
             return {}
         
-        # Get locations (required by Square)
+        # Get locations
         locations_response = self._make_square_request('v2/locations', access_token)
         if not locations_response or locations_response.status_code != 200:
             return {}
@@ -281,49 +281,87 @@ class SquareSync:
         
         location_ids = [loc['id'] for loc in locations if loc.get('id')]
         
-        # Search invoices
+        # Date filter for invoices - last 3 months
+        cutoff_date = (datetime.now() - timedelta(days=CUSTOMER_HISTORY_DAYS)).isoformat() + 'Z'
+        
+        # Search invoices with pagination AND date filtering
         search_data = {
             'limit': 100,
             'query': {
                 'filter': {
-                    'location_ids': location_ids
+                    'location_ids': location_ids,
+                    'created_at': {'start_at': cutoff_date}  # Added date filter
                 }
             }
         }
         
-        response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
-        if not response or response.status_code != 200:
-            return {}
+        all_invoices = []
+        cursor = None
         
-        invoices = response.json().get('invoices', [])
-        if not invoices:
+        # Get ALL invoices with pagination
+        while True:
+            if cursor:
+                search_data['cursor'] = cursor
+            
+            response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
+            if not response or response.status_code != 200:
+                print(f"Invoice search failed: {response.status_code if response else 'No response'}")
+                break
+            
+            data = response.json()
+            invoices = data.get('invoices', [])
+            all_invoices.extend(invoices)
+            print(f"Got {len(invoices)} invoices (total: {len(all_invoices)})")
+            
+            cursor = data.get('cursor')
+            if not cursor:
+                break
+            
+            # Safety limit
+            if len(all_invoices) > 2000:
+                break
+        
+        print(f"Found {len(all_invoices)} total invoices")
+        
+        if not all_invoices:
             return {}
         
         # Get order IDs from invoices
         order_ids = []
-        invoice_to_order = {}
-        for invoice in invoices:
+        invoice_by_order = {}
+        for invoice in all_invoices:
             order_id = invoice.get('order_id')
             if order_id:
                 order_ids.append(order_id)
-                invoice_to_order[order_id] = invoice
+                invoice_by_order[order_id] = invoice
         
-        # Fetch orders to get fulfillment details
+        print(f"Found {len(order_ids)} order IDs from invoices")
+        
+        # Fetch orders in batches
         order_details = {}
-        if order_ids:
-            orders_data = {'order_ids': order_ids}
+        batch_size = 25
+        
+        for i in range(0, len(order_ids), batch_size):
+            batch_order_ids = order_ids[i:i + batch_size]
+            orders_data = {'order_ids': batch_order_ids}
+            
             orders_response = self._make_square_request('v2/orders/batch-retrieve', access_token, 'POST', orders_data)
             if orders_response and orders_response.status_code == 200:
                 orders = orders_response.json().get('orders', [])
                 for order in orders:
                     order_id = order.get('id')
                     order_details[order_id] = order
+            
+            # Small delay between batches
+            time.sleep(0.1)
         
-        # Map invoices to customers with comprehensive data
+        print(f"Retrieved {len(order_details)} orders")
+        
+        # Map invoices to customers
         customer_invoices = {}
         customer_id_set = set(customer_ids)
         
-        for invoice in invoices:
+        for invoice in all_invoices:
             # Get customer ID from invoice
             customer_id = None
             if 'primary_recipient' in invoice:
@@ -376,6 +414,7 @@ class SquareSync:
                     'delivery_notes': delivery_notes
                 }
         
+        print(f"Mapped invoice data for {len(customer_invoices)} customers")
         return customer_invoices
 
     def save_customer_data(self, merchant_id, customers):
