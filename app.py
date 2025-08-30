@@ -270,18 +270,27 @@ class SquareSync:
         if not customer_ids:
             return {}
         
-        # Get locations (required by Square)
+        print(f"📄 Fetching invoices for {len(customer_ids)} customers")
+        
+        # First, get merchant locations (required for invoice search)
         locations_response = self._make_square_request('v2/locations', access_token)
+        
         if not locations_response or locations_response.status_code != 200:
+            print(f"❌ Failed to get locations: {locations_response.status_code if locations_response else 'No response'}")
             return {}
         
-        locations = locations_response.json().get('locations', [])
+        locations_data = locations_response.json()
+        locations = locations_data.get('locations', [])
+        
         if not locations:
+            print("❌ No locations found")
             return {}
         
-        location_ids = [loc['id'] for loc in locations if loc.get('id')]
+        # Get location IDs
+        location_ids = [loc.get('id') for loc in locations if loc.get('id')]
+        print(f"✅ Found {len(location_ids)} locations: {location_ids}")
         
-        # Search invoices
+        # Now search invoices with proper query structure
         search_data = {
             'limit': 100,
             'query': {
@@ -291,26 +300,68 @@ class SquareSync:
             }
         }
         
-        response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
-        if not response or response.status_code != 200:
+        all_invoices = []
+        cursor = None
+        
+        while True:
+            if cursor:
+                search_data['cursor'] = cursor
+            
+            response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
+            
+            if not response or response.status_code != 200:
+                print(f"⚠️ Invoice fetch failed: {response.status_code if response else 'No response'}")
+                if response:
+                    print(f"Error details: {response.text}")
+                return {}
+            
+            data = response.json()
+            invoices = data.get('invoices', [])
+            all_invoices.extend(invoices)
+            print(f"📄 Got {len(invoices)} invoices (total: {len(all_invoices)})")
+            
+            cursor = data.get('cursor')
+            if not cursor:
+                break
+            
+            if len(all_invoices) > 1000:  # Safety limit
+                break
+        
+        print(f"✅ Total invoices found: {len(all_invoices)}")
+        
+        # If no invoices found, return empty dict
+        if not all_invoices:
+            print("❌ No invoices found at all")
             return {}
         
-        invoices = response.json().get('invoices', [])
-        if not invoices:
-            return {}
+        # Debug first invoice structure
+        first_invoice = all_invoices[0]
+        print(f"🔍 First invoice keys: {list(first_invoice.keys())}")
         
         # Map invoices to customers
         customer_invoices = {}
         customer_id_set = set(customer_ids)
         
-        for invoice in invoices:
-            # Get customer ID from invoice
+        for invoice in all_invoices:
+            # Try multiple ways to get customer ID
             customer_id = None
+            
+            # Method 1: primary_recipient
             if 'primary_recipient' in invoice:
                 customer_id = invoice['primary_recipient'].get('customer_id')
             
+            # Method 2: invoice_recipients
+            if not customer_id and 'invoice_recipients' in invoice:
+                recipients = invoice['invoice_recipients']
+                if recipients:
+                    customer_id = recipients[0].get('customer_id')
+            
+            # Method 3: order -> customer_id
+            if not customer_id and 'order' in invoice:
+                customer_id = invoice['order'].get('customer_id')
+            
             if customer_id and customer_id in customer_id_set and customer_id not in customer_invoices:
-                # Extract invoice data
+                # Extract invoice fields safely
                 payment_requests = invoice.get('payment_requests', [])
                 order = invoice.get('order', {})
                 total_money = order.get('total_money', {})
@@ -323,6 +374,7 @@ class SquareSync:
                     'invoice_amount': str(total_money.get('amount', 0))
                 }
         
+        print(f"✅ Matched {len(customer_invoices)} invoices to customers")
         return customer_invoices
 
     def save_customer_data(self, merchant_id, customers):
@@ -420,31 +472,47 @@ class SquareSync:
     
     def sync_merchant(self, merchant_id):
         """Complete sync process for one merchant"""
+        print(f"🚀 Starting sync for {merchant_id}")
+        
         # Get tokens
         tokens = self.get_tokens(merchant_id)
         if not tokens:
+            print(f"❌ No tokens found for {merchant_id}")
             return False
         
         # Fetch customers
         customers = self.fetch_customers(merchant_id, tokens['access_token'])
         if not customers:
+            print(f"❌ No customers fetched for {merchant_id}")
             return False
         
-        # Fetch invoices
-        customer_ids = [c.get('id') for c in customers if c.get('id')]
-        invoices = self.fetch_invoices(tokens['access_token'], customer_ids)
+        print(f"✅ Got {len(customers)} customers")
         
-        # Merge invoice data
+        # Fetch invoices - THIS WAS MISSING!
+        customer_ids = [c.get('id') for c in customers if c.get('id')]
+        print(f"🔍 About to fetch invoices for {len(customer_ids)} customer IDs")
+        
+        invoices = self.fetch_invoices(tokens['access_token'], customer_ids)
+        print(f"🔍 fetch_invoices returned: {len(invoices) if invoices else 0} mappings")
+        
+        # Merge invoice data - THIS WAS MISSING!
+        customers_with_invoices = 0
         for customer in customers:
             customer_id = customer.get('id')
             if customer_id and customer_id in invoices:
                 customer['latest_invoice'] = invoices[customer_id]
+                customers_with_invoices += 1
+                print(f"✅ Added invoice to customer {customer_id}")
+        
+        print(f"🔗 Final: {customers_with_invoices} customers have invoice data")
         
         # Save data
         if self.save_customer_data(merchant_id, customers):
             self.update_sync_status(merchant_id, len(customers))
+            print(f"✅ Sync complete for {merchant_id}: {len(customers)} customers")
             return True
         
+        print(f"❌ Failed to save data for {merchant_id}")
         return False
 
     def should_sync(self, last_sync):
