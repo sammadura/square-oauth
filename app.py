@@ -1,4 +1,7 @@
 from flask import Flask, redirect, request, jsonify, Response
+
+from square_field_explorer import SquareFieldExplorer
+from explorer_routes import add_explorer_routes
 import requests
 import os
 import json
@@ -596,6 +599,8 @@ class SquareSync:
 # Global sync instance
 sync = SquareSync()
 
+add_explorer_routes(app, sync)
+
 @app.route('/')
 def home():
     return '''
@@ -605,11 +610,28 @@ def home():
                border-radius: 8px; margin: 10px; display: inline-block; }
         .btn:hover { background: #0056b3; }
         .btn-success { background: #28a745; }
+        .btn-info { background: #17a2b8; }
+        .feature-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; 
+                       max-width: 800px; margin: 30px auto; }
+        .feature-box { background: white; padding: 25px; border-radius: 10px; 
+                      box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     </style>
-    <h1>🔄 Square Customer Data Sync</h1>
-    <p>Automatically sync customer data from Square to Google Sheets.</p>
-    <a href="/signin" class="btn">Connect Your Square Account</a>
-    <a href="/dashboard" class="btn btn-success">View Dashboard</a>
+    <h1>🔄 Square Integration Platform</h1>
+    <p>Comprehensive tools for Square merchant data management and API exploration.</p>
+    
+    <div class="feature-grid">
+        <div class="feature-box">
+            <h3>📊 Customer Data Sync</h3>
+            <p>Automatically sync customer data from Square to Google Sheets with invoice details and fulfillment information.</p>
+            <a href="/signin" class="btn">Connect Your Square Account</a>
+            <a href="/dashboard" class="btn btn-success">View Dashboard</a>
+        </div>
+        <div class="feature-box">
+            <h3>🔍 API Field Explorer</h3>
+            <p>Discover and document all available fields in Square's Orders and Catalog APIs for integration planning.</p>
+            <a href="/explorer" class="btn btn-info">Explore API Fields</a>
+        </div>
+    </div>
     '''
 
 @app.route('/signin')
@@ -760,7 +782,7 @@ def oauth2callback():
 
 @app.route('/dashboard')
 def dashboard():
-    """Main dashboard"""
+    """Updated dashboard with explorer link"""
     merchants = sync.get_all_merchants()
     
     if not merchants:
@@ -802,6 +824,8 @@ def dashboard():
                    padding: 8px 12px; text-decoration: none; border-radius: 4px; margin: 2px;">Sync</a>
                 <a href="/api/export/{merchant_id}" style="background: #007bff; color: white; 
                    padding: 8px 12px; text-decoration: none; border-radius: 4px; margin: 2px;">Export</a>
+                <a href="/explorer/quick-export/{merchant_id}" style="background: #17a2b8; color: white; 
+                   padding: 8px 12px; text-decoration: none; border-radius: 4px; margin: 2px;">🔍 Fields</a>
             </td>
         </tr>
         '''
@@ -812,6 +836,8 @@ def dashboard():
         table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
         th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
         th {{ background-color: #f2f2f2; }}
+        .feature-card {{ background: white; padding: 20px; border-radius: 8px; margin: 15px 0; 
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
     </style>
     
     <h1>🔄 Square Sync Dashboard</h1>
@@ -820,6 +846,21 @@ def dashboard():
         <h3>📊 Status</h3>
         <p><strong>Connected Merchants:</strong> {len(merchants)}</p>
         <p><strong>Auto-sync:</strong> Every {SYNC_INTERVAL_HOURS} hours</p>
+    </div>
+    
+    <!-- NEW: Feature cards for different tools -->
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 30px;">
+        <div class="feature-card">
+            <h3>📊 Customer Data Sync</h3>
+            <p>Automatically sync customer data from Square to Google Sheets</p>
+            <p><em>Current functionality - working as normal</em></p>
+        </div>
+        <div class="feature-card">
+            <h3>🔍 API Field Explorer</h3>
+            <p>Discover all available fields in Square's Orders & Catalog APIs</p>
+            <a href="/explorer" style="background: #17a2b8; color: white; padding: 10px 20px; 
+               text-decoration: none; border-radius: 5px;">Explore Fields →</a>
+        </div>
     </div>
     
     <table>
@@ -840,6 +881,8 @@ def dashboard():
            text-decoration: none; border-radius: 5px; margin: 5px;">🔄 Sync All</a>
         <a href="/api/lookup-customer" style="background: #17a2b8; color: white; padding: 10px 20px; 
            text-decoration: none; border-radius: 5px; margin: 5px;">🔍 Customer Lookup</a>
+        <a href="/explorer" style="background: #6f42c1; color: white; padding: 10px 20px; 
+           text-decoration: none; border-radius: 5px; margin: 5px;">🔍 Field Explorer</a>
     </div>
     '''
 
