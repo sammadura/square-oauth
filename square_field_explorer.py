@@ -107,31 +107,22 @@ class SquareFieldExplorer:
                 'query': {
                     'filter': {
                         'date_time_filter': {
-                            'created_at': {'start_at': start_date}
+                            'created_at': {
+                                'start_at': start_date
+                            }
                         }
-                    },
-                    'sort': {'sort_field': 'CREATED_AT', 'sort_order': 'DESC'}
+                    }
                 }
             }
         elif sample_type == 'completed':
-            # Completed orders
+            # Completed orders - use simple query without state filter
             search_data = {
-                'limit': limit,
-                'query': {
-                    'filter': {
-                        'state_filter': {'states': ['COMPLETED']}
-                    }
-                }
+                'limit': limit
             }
         else:  # varied
-            # Mix of different states
+            # Just get any orders without complex filtering
             search_data = {
-                'limit': limit,
-                'query': {
-                    'filter': {
-                        'state_filter': {'states': ['COMPLETED', 'OPEN', 'CANCELED']}
-                    }
-                }
+                'limit': limit
             }
         
         # Get order IDs from search
