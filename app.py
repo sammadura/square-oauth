@@ -1,7 +1,4 @@
 from flask import Flask, redirect, request, jsonify, Response
-
-from square_field_explorer import SquareFieldExplorer
-from explorer_routes import add_explorer_routes
 import requests
 import os
 import json
@@ -20,7 +17,7 @@ SQUARE_API_VERSION = '2025-08-20'
 SYNC_INTERVAL_HOURS = 12
 SYNC_THRESHOLD_DAYS = 3
 TOKEN_REFRESH_DAYS = 25
-CUSTOMER_HISTORY_DAYS = 90
+CUSTOMER_HISTORY_DAYS = 365
 
 class SquareSync:
     def __init__(self):
@@ -178,10 +175,10 @@ class SquareSync:
         return False
     
     def fetch_customers(self, merchant_id, access_token):
-        """Fetch customers from Square with 3-month date filtering"""
+        """Fetch customers from Square with date filtering"""
         print(f"👥 Fetching customers for {merchant_id}")
         
-        # Date filter - last 3 months
+        # Date filter
         cutoff_date = (datetime.now() - timedelta(days=CUSTOMER_HISTORY_DAYS)).isoformat() + 'Z'
         
         search_data = {
@@ -269,31 +266,36 @@ class SquareSync:
         return all_customers
     
     def fetch_invoices(self, access_token, customer_ids):
-        """Fetch invoices with pagination and proper customer filtering"""
+        """Fetch invoice data for customers"""
         if not customer_ids:
             return {}
         
-        # Get locations
+        print(f"📄 Fetching invoices for {len(customer_ids)} customers")
+        
+        # First, get merchant locations (required for invoice search)
         locations_response = self._make_square_request('v2/locations', access_token)
+        
         if not locations_response or locations_response.status_code != 200:
+            print(f"❌ Failed to get locations: {locations_response.status_code if locations_response else 'No response'}")
             return {}
         
-        locations = locations_response.json().get('locations', [])
+        locations_data = locations_response.json()
+        locations = locations_data.get('locations', [])
+        
         if not locations:
+            print("❌ No locations found")
             return {}
         
-        location_ids = [loc['id'] for loc in locations if loc.get('id')]
+        # Get location IDs
+        location_ids = [loc.get('id') for loc in locations if loc.get('id')]
+        print(f"✅ Found {len(location_ids)} locations: {location_ids}")
         
-        # Date filter for invoices - last 3 months
-        cutoff_date = (datetime.now() - timedelta(days=CUSTOMER_HISTORY_DAYS)).isoformat() + 'Z'
-        
-        # Search invoices with pagination AND date filtering
+        # Now search invoices with proper query structure
         search_data = {
             'limit': 100,
             'query': {
                 'filter': {
-                    'location_ids': location_ids,
-                    'created_at': {'start_at': cutoff_date}  # Added date filter
+                    'location_ids': location_ids
                 }
             }
         }
@@ -301,127 +303,82 @@ class SquareSync:
         all_invoices = []
         cursor = None
         
-        # Get ALL invoices with pagination
         while True:
             if cursor:
                 search_data['cursor'] = cursor
             
             response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
+            
             if not response or response.status_code != 200:
-                print(f"Invoice search failed: {response.status_code if response else 'No response'}")
-                break
+                print(f"⚠️ Invoice fetch failed: {response.status_code if response else 'No response'}")
+                if response:
+                    print(f"Error details: {response.text}")
+                return {}
             
             data = response.json()
             invoices = data.get('invoices', [])
             all_invoices.extend(invoices)
-            print(f"Got {len(invoices)} invoices (total: {len(all_invoices)})")
+            print(f"📄 Got {len(invoices)} invoices (total: {len(all_invoices)})")
             
             cursor = data.get('cursor')
             if not cursor:
                 break
             
-            # Safety limit
-            if len(all_invoices) > 2000:
+            if len(all_invoices) > 1000:  # Safety limit
                 break
         
-        print(f"Found {len(all_invoices)} total invoices")
+        print(f"✅ Total invoices found: {len(all_invoices)}")
         
+        # If no invoices found, return empty dict
         if not all_invoices:
+            print("❌ No invoices found at all")
             return {}
         
-        # Get order IDs from invoices
-        order_ids = []
-        invoice_by_order = {}
-        for invoice in all_invoices:
-            order_id = invoice.get('order_id')
-            if order_id:
-                order_ids.append(order_id)
-                invoice_by_order[order_id] = invoice
-        
-        print(f"Found {len(order_ids)} order IDs from invoices")
-        
-        # Fetch orders in batches
-        order_details = {}
-        batch_size = 25
-        
-        for i in range(0, len(order_ids), batch_size):
-            batch_order_ids = order_ids[i:i + batch_size]
-            orders_data = {'order_ids': batch_order_ids}
-            
-            orders_response = self._make_square_request('v2/orders/batch-retrieve', access_token, 'POST', orders_data)
-            if orders_response and orders_response.status_code == 200:
-                orders = orders_response.json().get('orders', [])
-                for order in orders:
-                    order_id = order.get('id')
-                    order_details[order_id] = order
-            
-            # Small delay between batches
-            time.sleep(0.1)
-        
-        print(f"Retrieved {len(order_details)} orders")
+        # Debug first invoice structure
+        first_invoice = all_invoices[0]
+        print(f"🔍 First invoice keys: {list(first_invoice.keys())}")
         
         # Map invoices to customers
         customer_invoices = {}
         customer_id_set = set(customer_ids)
         
         for invoice in all_invoices:
-            # Get customer ID from invoice
+            # Try multiple ways to get customer ID
             customer_id = None
+            
+            # Method 1: primary_recipient
             if 'primary_recipient' in invoice:
                 customer_id = invoice['primary_recipient'].get('customer_id')
             
+            # Method 2: invoice_recipients
+            if not customer_id and 'invoice_recipients' in invoice:
+                recipients = invoice['invoice_recipients']
+                if recipients:
+                    customer_id = recipients[0].get('customer_id')
+            
+            # Method 3: order -> customer_id
+            if not customer_id and 'order' in invoice:
+                customer_id = invoice['order'].get('customer_id')
+            
             if customer_id and customer_id in customer_id_set and customer_id not in customer_invoices:
-                # Get associated order data
-                order_id = invoice.get('order_id')
-                order = order_details.get(order_id, {})
-                
-                # Extract fulfillment details
-                fulfillments = order.get('fulfillments', [])
-                pickup_date = ''
-                delivery_date = ''
-                pickup_notes = ''
-                delivery_notes = ''
-                
-                for fulfillment in fulfillments:
-                    pickup_details = fulfillment.get('pickup_details', {})
-                    delivery_details = fulfillment.get('delivery_details', {})
-                    
-                    if pickup_details:
-                        pickup_date = pickup_details.get('pickup_at', '')
-                        pickup_notes = pickup_details.get('note', '')
-                        
-                    if delivery_details:
-                        delivery_date = delivery_details.get('deliver_at', '')
-                        delivery_notes = delivery_details.get('note', '')
-                
-                # Extract invoice data
+                # Extract invoice fields safely
                 payment_requests = invoice.get('payment_requests', [])
-                order_money = invoice.get('order', {})
-                total_money = order_money.get('total_money', {})
+                order = invoice.get('order', {})
+                total_money = order.get('total_money', {})
                 
                 customer_invoices[customer_id] = {
-                    'invoice_id': invoice.get('id', ''),
-                    'invoice_number': invoice.get('invoice_number', ''),
-                    'invoice_created_at': invoice.get('created_at', ''),
-                    'invoice_updated_at': invoice.get('updated_at', ''),
-                    'invoice_scheduled_at': invoice.get('scheduled_at', ''),
-                    'invoice_status': invoice.get('status', ''),
-                    'invoice_amount': str(total_money.get('amount', 0)),
+                    'id': invoice.get('id', ''),
+                    'sale_or_service_date': invoice.get('created_at', ''),
                     'due_date': payment_requests[0].get('due_date', '') if payment_requests else '',
-                    'order_id': order_id or '',
-                    'order_created_at': order.get('created_at', ''),
-                    'order_updated_at': order.get('updated_at', ''),
-                    'pickup_date': pickup_date,
-                    'pickup_notes': pickup_notes,
-                    'delivery_date': delivery_date,
-                    'delivery_notes': delivery_notes
+                    'invoice_status': invoice.get('status', ''),
+                    'invoice_amount': str(total_money.get('amount', 0))
                 }
         
-        print(f"Mapped invoice data for {len(customer_invoices)} customers")
+        print(f"✅ Matched {len(customer_invoices)} invoices to customers")
         return customer_invoices
 
     def save_customer_data(self, merchant_id, customers):
-        """Save customer data to Google Sheets with expanded invoice fields"""
+        """Save customer data to Google Sheets"""
         sheet_name = f"customers_{merchant_id}"
         sheet = self._get_sheet(sheet_name)
         if not sheet:
@@ -430,18 +387,14 @@ class SquareSync:
         # Clear existing data
         sheet.clear()
         
-        # Updated headers with all the invoice/order fields
+        # Headers
         headers = [
             'customer_id', 'given_name', 'family_name', 'company_name', 'nickname',
             'email_address', 'phone_number', 'address_line_1', 'address_line_2', 
             'locality', 'administrative_district_level_1', 'postal_code', 'country',
             'created_at', 'updated_at', 'birthday', 'note', 'reference_id',
             'group_ids', 'segment_ids', 'preferences', 'version', 'sync_date',
-            # Invoice and Order fields
-            'invoice_id', 'invoice_number', 'invoice_created_at', 'invoice_updated_at', 
-            'invoice_scheduled_at', 'invoice_status', 'invoice_amount', 'due_date',
-            'order_id', 'order_created_at', 'order_updated_at',
-            'pickup_date', 'pickup_notes', 'delivery_date', 'delivery_notes'
+            'latest_invoice_id', 'sale_or_service_date', 'due_date', 'invoice_status', 'invoice_amount'
         ]
         
         # Prepare data
@@ -474,22 +427,11 @@ class SquareSync:
                 json.dumps(customer.get('preferences', {})) if customer.get('preferences') else '',
                 str(customer.get('version', '')),
                 datetime.now().isoformat(),
-                # Invoice and Order data
-                invoice.get('invoice_id', ''),
-                invoice.get('invoice_number', ''),
-                invoice.get('invoice_created_at', ''),
-                invoice.get('invoice_updated_at', ''),
-                invoice.get('invoice_scheduled_at', ''),
-                invoice.get('invoice_status', ''),
-                invoice.get('invoice_amount', ''),
+                invoice.get('id', ''),
+                invoice.get('sale_or_service_date', ''),
                 invoice.get('due_date', ''),
-                invoice.get('order_id', ''),
-                invoice.get('order_created_at', ''),
-                invoice.get('order_updated_at', ''),
-                invoice.get('pickup_date', ''),
-                invoice.get('pickup_notes', ''),
-                invoice.get('delivery_date', ''),
-                invoice.get('delivery_notes', '')
+                invoice.get('invoice_status', ''),
+                invoice.get('invoice_amount', '')
             ]
             rows.append(row)
         
@@ -497,9 +439,10 @@ class SquareSync:
         try:
             range_name = f'A1:{self._get_column_letter(len(headers))}{len(rows)}'
             sheet.update(values=rows, range_name=range_name)
+            print(f"✅ Saved {len(rows)-1} customers to {sheet_name}")
             return True
         except Exception as e:
-            print(f"Save error: {e}")
+            print(f"❌ Save error: {e}")
             return False
     
     def _get_column_letter(self, col_num):
@@ -599,8 +542,6 @@ class SquareSync:
 # Global sync instance
 sync = SquareSync()
 
-add_explorer_routes(app, sync)
-
 @app.route('/')
 def home():
     return '''
@@ -610,28 +551,11 @@ def home():
                border-radius: 8px; margin: 10px; display: inline-block; }
         .btn:hover { background: #0056b3; }
         .btn-success { background: #28a745; }
-        .btn-info { background: #17a2b8; }
-        .feature-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; 
-                       max-width: 800px; margin: 30px auto; }
-        .feature-box { background: white; padding: 25px; border-radius: 10px; 
-                      box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     </style>
-    <h1>🔄 Square Integration Platform</h1>
-    <p>Comprehensive tools for Square merchant data management and API exploration.</p>
-    
-    <div class="feature-grid">
-        <div class="feature-box">
-            <h3>📊 Customer Data Sync</h3>
-            <p>Automatically sync customer data from Square to Google Sheets with invoice details and fulfillment information.</p>
-            <a href="/signin" class="btn">Connect Your Square Account</a>
-            <a href="/dashboard" class="btn btn-success">View Dashboard</a>
-        </div>
-        <div class="feature-box">
-            <h3>🔍 API Field Explorer</h3>
-            <p>Discover and document all available fields in Square's Orders and Catalog APIs for integration planning.</p>
-            <a href="/explorer" class="btn btn-info">Explore API Fields</a>
-        </div>
-    </div>
+    <h1>🔄 Square Customer Data Sync</h1>
+    <p>Automatically sync customer data from Square to Google Sheets.</p>
+    <a href="/signin" class="btn">Connect Your Square Account</a>
+    <a href="/dashboard" class="btn btn-success">View Dashboard</a>
     '''
 
 @app.route('/signin')
@@ -782,7 +706,7 @@ def oauth2callback():
 
 @app.route('/dashboard')
 def dashboard():
-    """Updated dashboard with explorer link"""
+    """Main dashboard"""
     merchants = sync.get_all_merchants()
     
     if not merchants:
@@ -824,8 +748,6 @@ def dashboard():
                    padding: 8px 12px; text-decoration: none; border-radius: 4px; margin: 2px;">Sync</a>
                 <a href="/api/export/{merchant_id}" style="background: #007bff; color: white; 
                    padding: 8px 12px; text-decoration: none; border-radius: 4px; margin: 2px;">Export</a>
-                <a href="/explorer/quick-export/{merchant_id}" style="background: #17a2b8; color: white; 
-                   padding: 8px 12px; text-decoration: none; border-radius: 4px; margin: 2px;">🔍 Fields</a>
             </td>
         </tr>
         '''
@@ -836,8 +758,6 @@ def dashboard():
         table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
         th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
         th {{ background-color: #f2f2f2; }}
-        .feature-card {{ background: white; padding: 20px; border-radius: 8px; margin: 15px 0; 
-                        box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
     </style>
     
     <h1>🔄 Square Sync Dashboard</h1>
@@ -846,21 +766,6 @@ def dashboard():
         <h3>📊 Status</h3>
         <p><strong>Connected Merchants:</strong> {len(merchants)}</p>
         <p><strong>Auto-sync:</strong> Every {SYNC_INTERVAL_HOURS} hours</p>
-    </div>
-    
-    <!-- NEW: Feature cards for different tools -->
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 30px;">
-        <div class="feature-card">
-            <h3>📊 Customer Data Sync</h3>
-            <p>Automatically sync customer data from Square to Google Sheets</p>
-            <p><em>Current functionality - working as normal</em></p>
-        </div>
-        <div class="feature-card">
-            <h3>🔍 API Field Explorer</h3>
-            <p>Discover all available fields in Square's Orders & Catalog APIs</p>
-            <a href="/explorer" style="background: #17a2b8; color: white; padding: 10px 20px; 
-               text-decoration: none; border-radius: 5px;">Explore Fields →</a>
-        </div>
     </div>
     
     <table>
@@ -879,10 +784,6 @@ def dashboard():
            text-decoration: none; border-radius: 5px; margin: 5px;">➕ Connect New Account</a>
         <a href="/api/force-sync-all" style="background: #ffc107; color: black; padding: 10px 20px; 
            text-decoration: none; border-radius: 5px; margin: 5px;">🔄 Sync All</a>
-        <a href="/api/lookup-customer" style="background: #17a2b8; color: white; padding: 10px 20px; 
-           text-decoration: none; border-radius: 5px; margin: 5px;">🔍 Customer Lookup</a>
-        <a href="/explorer" style="background: #6f42c1; color: white; padding: 10px 20px; 
-           text-decoration: none; border-radius: 5px; margin: 5px;">🔍 Field Explorer</a>
     </div>
     '''
 
@@ -1046,201 +947,6 @@ def health():
         'timestamp': datetime.now().isoformat(),
         'merchants_connected': len(sync.get_all_merchants())
     })
-
-@app.route('/api/lookup-customer', methods=['GET', 'POST'])
-def lookup_customer():
-    """Direct API lookup for customer invoices"""
-    if request.method == 'POST':
-        merchant_id = request.form.get('merchant_id')
-        customer_id = request.form.get('customer_id')
-        
-        if not merchant_id or not customer_id:
-            return '''
-            <div style="max-width: 600px; margin: 50px auto; padding: 30px; text-align: center;">
-                <h2 style="color: #dc3545;">❌ Error</h2>
-                <p>Both Merchant ID and Customer ID are required</p>
-                <a href="/api/lookup-customer" class="btn">Try Again</a>
-            </div>
-            '''
-        
-        # Get merchant tokens
-        tokens = sync.get_tokens(merchant_id)
-        if not tokens or 'access_token' not in tokens:
-            return '''
-            <div style="max-width: 600px; margin: 50px auto; padding: 30px; text-align: center;">
-                <h2 style="color: #dc3545;">❌ Error</h2>
-                <p>Invalid merchant ID or merchant not connected</p>
-                <a href="/api/lookup-customer" class="btn">Try Again</a>
-            </div>
-            '''
-        
-        access_token = tokens['access_token']
-        
-        # Get customer details first
-        customer_response = sync._make_square_request(f'v2/customers/{customer_id}', access_token)
-        if not customer_response or customer_response.status_code != 200:
-            return '''
-            <div style="max-width: 600px; margin: 50px auto; padding: 30px; text-align: center;">
-                <h2 style="color: #dc3545;">❌ Error</h2>
-                <p>Customer not found</p>
-                <a href="/api/lookup-customer" class="btn">Try Again</a>
-            </div>
-            '''
-        
-        customer_data = customer_response.json().get('customer', {})
-        
-        # Get all locations for the merchant
-        locations_response = sync._make_square_request('v2/locations', access_token)
-        if not locations_response or locations_response.status_code != 200:
-            return 'Failed to get merchant locations', 500
-        
-        location_ids = [loc['id'] for loc in locations_response.json().get('locations', [])]
-        
-        # Search for invoices with customer filter
-        search_data = {
-            'query': {
-                'filter': {
-                    'customer_ids': [customer_id],
-                    'location_ids': location_ids
-                }
-            }
-        }
-        
-        invoices_response = sync._make_square_request('v2/invoices/search', 
-                                                    access_token, 
-                                                    'POST', 
-                                                    search_data)
-        
-        if not invoices_response or invoices_response.status_code != 200:
-            return 'Failed to fetch invoices', 500
-        
-        invoices = invoices_response.json().get('invoices', [])
-        
-        # Get associated orders
-        order_details = {}
-        for invoice in invoices:
-            order_id = invoice.get('order_id')
-            if order_id:
-                order_response = sync._make_square_request(f'v2/orders/{order_id}', access_token)
-                if order_response and order_response.status_code == 200:
-                    order_details[order_id] = order_response.json().get('order', {})
-        
-        # Build the display
-        invoice_rows = ""
-        for invoice in invoices:
-            order_id = invoice.get('order_id')
-            order = order_details.get(order_id, {})
-            
-            # Get order amount
-            total_money = order.get('total_money', {})
-            amount = float(total_money.get('amount', 0)) / 100 if total_money else 0
-            
-            # Get sale or service date from order metadata
-            sale_or_service_date = 'N/A'
-            if 'metadata' in order:
-                sale_or_service_date = order['metadata'].get('sale_or_service_date', 'N/A')
-
-            # Get fulfillment details
-            fulfillments = order.get('fulfillments', [])
-            pickup_date = delivery_date = pickup_notes = delivery_notes = 'N/A'
-            
-            for fulfillment in fulfillments:
-                if 'pickup_details' in fulfillment:
-                    pickup = fulfillment['pickup_details']
-                    pickup_date = pickup.get('pickup_at', 'N/A')
-                    pickup_notes = pickup.get('note', 'N/A')
-                if 'delivery_details' in fulfillment:
-                    delivery = fulfillment['delivery_details']
-                    delivery_date = delivery.get('deliver_at', 'N/A')
-                    delivery_notes = delivery.get('note', 'N/A')
-            
-            invoice_rows += f'''
-            <tr>
-                <td>{invoice.get('id', 'N/A')}</td>
-                <td>{invoice.get('invoice_number', 'N/A')}</td>
-                <td>${amount:.2f}</td>
-                <td>{invoice.get('status', 'N/A')}</td>
-                <td>{invoice.get('created_at', 'N/A')}</td>
-                <td>{sale_or_service_date}</td>
-                <td>{pickup_date}</td>
-                <td>{delivery_date}</td>
-            </tr>
-            '''
-        
-        return f'''
-        <div style="max-width: 1000px; margin: 50px auto; padding: 30px;">
-            <h2>📋 Customer Details</h2>
-            <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
-                <p><strong>Name:</strong> {customer_data.get('given_name', '')} {customer_data.get('family_name', '')}</p>
-                <p><strong>Email:</strong> {customer_data.get('email_address', 'N/A')}</p>
-                <p><strong>Phone:</strong> {customer_data.get('phone_number', 'N/A')}</p>
-                <p><strong>Customer ID:</strong> {customer_id}</p>
-            </div>
-            
-            <h3>📊 Invoice History ({len(invoices)} invoices found)</h3>
-            <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
-                <tr>
-                    <th>Invoice ID</th>
-                    <th>Invoice Number</th>
-                    <th>Amount</th>
-                    <th>Status</th>
-                    <th>Created Date</th>
-                    <th>Sale/Service Date</th>
-                    <th>Pickup Date</th>
-                    <th>Delivery Date</th>
-                </tr>
-                {invoice_rows}
-            </table>
-            
-            <div style="margin-top: 20px;">
-                <a href="/api/lookup-customer" style="background: #007bff; color: white; 
-                   padding: 10px 20px; text-decoration: none; border-radius: 5px;">New Lookup</a>
-                <a href="/dashboard" style="background: #6c757d; color: white; padding: 10px 20px; 
-                   text-decoration: none; border-radius: 5px; margin-left: 10px;">Back to Dashboard</a>
-            </div>
-        </div>
-        '''
-    
-    # GET request - show form
-    merchants = sync.get_all_merchants()
-    merchant_options = ''.join([
-        f'<option value="{m["merchant_id"]}">{m.get("merchant_name", "Unknown")} ({m["merchant_id"]})</option>'
-        for m in merchants
-    ])
-    
-    return f'''
-    <div style="max-width: 600px; margin: 50px auto; padding: 30px;">
-        <h2>🔍 Customer Invoice Lookup</h2>
-        <form method="POST" style="background: #f8f9fa; padding: 20px; border-radius: 8px;">
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px;">
-                    <strong>Select Merchant:</strong>
-                </label>
-                <select name="merchant_id" required style="width: 100%; padding: 8px; border-radius: 4px;">
-                    <option value="">-- Select Merchant --</option>
-                    {merchant_options}
-                </select>
-            </div>
-            
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px;">
-                    <strong>Customer ID:</strong>
-                </label>
-                <input type="text" name="customer_id" required 
-                       style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ced4da;">
-            </div>
-            
-            <button type="submit" style="background: #007bff; color: white; padding: 10px 20px; 
-                    border: none; border-radius: 5px; cursor: pointer;">
-                Look Up Customer
-            </button>
-        </form>
-        
-        <div style="margin-top: 20px; text-align: center;">
-            <a href="/dashboard" style="color: #6c757d; text-decoration: none;">Back to Dashboard</a>
-        </div>
-    </div>
-    '''
 
 # Expose sync methods for backwards compatibility
 def get_tokens_from_sheets(merchant_id):
