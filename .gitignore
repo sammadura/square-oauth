@@ -16,8 +16,3 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
-
-# ...existing code...
-
-# Test outputs
-invoice_example.json

@@ -838,6 +838,8 @@ def dashboard():
            text-decoration: none; border-radius: 5px; margin: 5px;">➕ Connect New Account</a>
         <a href="/api/force-sync-all" style="background: #ffc107; color: black; padding: 10px 20px; 
            text-decoration: none; border-radius: 5px; margin: 5px;">🔄 Sync All</a>
+        <a href="/api/lookup-customer" style="background: #17a2b8; color: white; padding: 10px 20px; 
+           text-decoration: none; border-radius: 5px; margin: 5px;">🔍 Customer Lookup</a>
     </div>
     '''
 
@@ -1001,6 +1003,194 @@ def health():
         'timestamp': datetime.now().isoformat(),
         'merchants_connected': len(sync.get_all_merchants())
     })
+
+@app.route('/api/lookup-customer', methods=['GET', 'POST'])
+def lookup_customer():
+    """Direct API lookup for customer invoices"""
+    if request.method == 'POST':
+        merchant_id = request.form.get('merchant_id')
+        customer_id = request.form.get('customer_id')
+        
+        if not merchant_id or not customer_id:
+            return '''
+            <div style="max-width: 600px; margin: 50px auto; padding: 30px; text-align: center;">
+                <h2 style="color: #dc3545;">❌ Error</h2>
+                <p>Both Merchant ID and Customer ID are required</p>
+                <a href="/api/lookup-customer" class="btn">Try Again</a>
+            </div>
+            '''
+        
+        # Get merchant tokens
+        tokens = sync.get_tokens(merchant_id)
+        if not tokens or 'access_token' not in tokens:
+            return '''
+            <div style="max-width: 600px; margin: 50px auto; padding: 30px; text-align: center;">
+                <h2 style="color: #dc3545;">❌ Error</h2>
+                <p>Invalid merchant ID or merchant not connected</p>
+                <a href="/api/lookup-customer" class="btn">Try Again</a>
+            </div>
+            '''
+        
+        access_token = tokens['access_token']
+        
+        # Get customer details first
+        customer_response = sync._make_square_request(f'v2/customers/{customer_id}', access_token)
+        if not customer_response or customer_response.status_code != 200:
+            return '''
+            <div style="max-width: 600px; margin: 50px auto; padding: 30px; text-align: center;">
+                <h2 style="color: #dc3545;">❌ Error</h2>
+                <p>Customer not found</p>
+                <a href="/api/lookup-customer" class="btn">Try Again</a>
+            </div>
+            '''
+        
+        customer_data = customer_response.json().get('customer', {})
+        
+        # Get all locations for the merchant
+        locations_response = sync._make_square_request('v2/locations', access_token)
+        if not locations_response or locations_response.status_code != 200:
+            return 'Failed to get merchant locations', 500
+        
+        location_ids = [loc['id'] for loc in locations_response.json().get('locations', [])]
+        
+        # Search for invoices with customer filter
+        search_data = {
+            'query': {
+                'filter': {
+                    'customer_ids': [customer_id],
+                    'location_ids': location_ids
+                }
+            }
+        }
+        
+        invoices_response = sync._make_square_request('v2/invoices/search', 
+                                                    access_token, 
+                                                    'POST', 
+                                                    search_data)
+        
+        if not invoices_response or invoices_response.status_code != 200:
+            return 'Failed to fetch invoices', 500
+        
+        invoices = invoices_response.json().get('invoices', [])
+        
+        # Get associated orders
+        order_details = {}
+        for invoice in invoices:
+            order_id = invoice.get('order_id')
+            if order_id:
+                order_response = sync._make_square_request(f'v2/orders/{order_id}', access_token)
+                if order_response and order_response.status_code == 200:
+                    order_details[order_id] = order_response.json().get('order', {})
+        
+        # Build the display
+        invoice_rows = ""
+        for invoice in invoices:
+            order_id = invoice.get('order_id')
+            order = order_details.get(order_id, {})
+            
+            # Get order amount
+            total_money = order.get('total_money', {})
+            amount = float(total_money.get('amount', 0)) / 100 if total_money else 0
+            
+            # Get fulfillment details
+            fulfillments = order.get('fulfillments', [])
+            pickup_date = delivery_date = pickup_notes = delivery_notes = 'N/A'
+            
+            for fulfillment in fulfillments:
+                if 'pickup_details' in fulfillment:
+                    pickup = fulfillment['pickup_details']
+                    pickup_date = pickup.get('pickup_at', 'N/A')
+                    pickup_notes = pickup.get('note', 'N/A')
+                if 'delivery_details' in fulfillment:
+                    delivery = fulfillment['delivery_details']
+                    delivery_date = delivery.get('deliver_at', 'N/A')
+                    delivery_notes = delivery.get('note', 'N/A')
+            
+            invoice_rows += f'''
+            <tr>
+                <td>{invoice.get('id', 'N/A')}</td>
+                <td>{invoice.get('invoice_number', 'N/A')}</td>
+                <td>${amount:.2f}</td>
+                <td>{invoice.get('status', 'N/A')}</td>
+                <td>{invoice.get('created_at', 'N/A')}</td>
+                <td>{pickup_date}</td>
+                <td>{delivery_date}</td>
+            </tr>
+            '''
+        
+        return f'''
+        <div style="max-width: 1000px; margin: 50px auto; padding: 30px;">
+            <h2>📋 Customer Details</h2>
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                <p><strong>Name:</strong> {customer_data.get('given_name', '')} {customer_data.get('family_name', '')}</p>
+                <p><strong>Email:</strong> {customer_data.get('email_address', 'N/A')}</p>
+                <p><strong>Phone:</strong> {customer_data.get('phone_number', 'N/A')}</p>
+                <p><strong>Customer ID:</strong> {customer_id}</p>
+            </div>
+            
+            <h3>📊 Invoice History ({len(invoices)} invoices found)</h3>
+            <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
+                <tr>
+                    <th>Invoice ID</th>
+                    <th>Invoice Number</th>
+                    <th>Amount</th>
+                    <th>Status</th>
+                    <th>Created Date</th>
+                    <th>Pickup Date</th>
+                    <th>Delivery Date</th>
+                </tr>
+                {invoice_rows}
+            </table>
+            
+            <div style="margin-top: 20px;">
+                <a href="/api/lookup-customer" style="background: #007bff; color: white; 
+                   padding: 10px 20px; text-decoration: none; border-radius: 5px;">New Lookup</a>
+                <a href="/dashboard" style="background: #6c757d; color: white; padding: 10px 20px; 
+                   text-decoration: none; border-radius: 5px; margin-left: 10px;">Back to Dashboard</a>
+            </div>
+        </div>
+        '''
+    
+    # GET request - show form
+    merchants = sync.get_all_merchants()
+    merchant_options = ''.join([
+        f'<option value="{m["merchant_id"]}">{m.get("merchant_name", "Unknown")} ({m["merchant_id"]})</option>'
+        for m in merchants
+    ])
+    
+    return f'''
+    <div style="max-width: 600px; margin: 50px auto; padding: 30px;">
+        <h2>🔍 Customer Invoice Lookup</h2>
+        <form method="POST" style="background: #f8f9fa; padding: 20px; border-radius: 8px;">
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px;">
+                    <strong>Select Merchant:</strong>
+                </label>
+                <select name="merchant_id" required style="width: 100%; padding: 8px; border-radius: 4px;">
+                    <option value="">-- Select Merchant --</option>
+                    {merchant_options}
+                </select>
+            </div>
+            
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px;">
+                    <strong>Customer ID:</strong>
+                </label>
+                <input type="text" name="customer_id" required 
+                       style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ced4da;">
+            </div>
+            
+            <button type="submit" style="background: #007bff; color: white; padding: 10px 20px; 
+                    border: none; border-radius: 5px; cursor: pointer;">
+                Look Up Customer
+            </button>
+        </form>
+        
+        <div style="margin-top: 20px; text-align: center;">
+            <a href="/dashboard" style="color: #6c757d; text-decoration: none;">Back to Dashboard</a>
+        </div>
+    </div>
+    '''
 
 # Expose sync methods for backwards compatibility
 def get_tokens_from_sheets(merchant_id):
