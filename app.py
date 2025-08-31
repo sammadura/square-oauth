@@ -13,7 +13,7 @@ from io import StringIO
 app = Flask(__name__)
 
 # Configuration
-SQUARE_API_VERSION = '2023-10-18'
+SQUARE_API_VERSION = '2025-08-20'
 SYNC_INTERVAL_HOURS = 12
 SYNC_THRESHOLD_DAYS = 3
 TOKEN_REFRESH_DAYS = 25
