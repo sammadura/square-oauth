@@ -1092,6 +1092,11 @@ def lookup_customer():
             total_money = order.get('total_money', {})
             amount = float(total_money.get('amount', 0)) / 100 if total_money else 0
             
+            # Get sale or service date from order metadata
+            sale_or_service_date = 'N/A'
+            if 'metadata' in order:
+                sale_or_service_date = order['metadata'].get('sale_or_service_date', 'N/A')
+
             # Get fulfillment details
             fulfillments = order.get('fulfillments', [])
             pickup_date = delivery_date = pickup_notes = delivery_notes = 'N/A'
@@ -1113,6 +1118,7 @@ def lookup_customer():
                 <td>${amount:.2f}</td>
                 <td>{invoice.get('status', 'N/A')}</td>
                 <td>{invoice.get('created_at', 'N/A')}</td>
+                <td>{sale_or_service_date}</td>
                 <td>{pickup_date}</td>
                 <td>{delivery_date}</td>
             </tr>
@@ -1136,6 +1142,7 @@ def lookup_customer():
                     <th>Amount</th>
                     <th>Status</th>
                     <th>Created Date</th>
+                    <th>Sale/Service Date</th>
                     <th>Pickup Date</th>
                     <th>Delivery Date</th>
                 </tr>
