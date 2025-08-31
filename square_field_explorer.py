@@ -95,8 +95,9 @@ class SquareFieldExplorer:
         return catalog_sample
     
     def _fetch_orders_sample(self, access_token, sample_type, limit):
-        """Fetch diverse order samples"""
-        orders = []
+        """Fetch diverse order samples - FIXED VERSION"""
+        # First, get order IDs from search
+        order_ids = []
         
         if sample_type == 'recent':
             # Recent orders (last 30 days)
@@ -133,23 +134,24 @@ class SquareFieldExplorer:
                 }
             }
         
+        # Get order IDs from search
         response = self.sync._make_square_request('v2/orders/search', access_token, 'POST', search_data)
         
         if response and response.status_code == 200:
             data = response.json()
-            orders = data.get('orders', [])
-            
-            # Get full order details for each order
-            for order in orders[:limit]:  # Respect limit
-                order_id = order.get('id')
-                if order_id:
-                    full_order = self._get_full_order_details(access_token, order_id)
-                    if full_order:
-                        orders.append(full_order)
-                
-                time.sleep(0.1)  # Rate limiting
+            search_orders = data.get('orders', [])
+            order_ids = [order.get('id') for order in search_orders if order.get('id')]
         
-        return orders
+        # Now fetch full details for each order ID
+        full_orders = []
+        for order_id in order_ids[:limit]:  # Respect the limit
+            full_order = self._get_full_order_details(access_token, order_id)
+            if full_order:
+                full_orders.append(full_order)
+            time.sleep(0.1)  # Rate limiting
+        
+        print(f"    ✅ Fetched {len(full_orders)} {sample_type} orders")
+        return full_orders
     
     def _get_full_order_details(self, access_token, order_id):
         """Get complete order details including all nested objects"""
