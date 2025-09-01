@@ -80,7 +80,7 @@ class SquareSync:
             print(f"❌ Square API error: {e}")
             return None
     
-    def save_tokens(self, merchant_id, access_token, refresh_token, merchant_name=None):
+    def save_tokens(self, merchant_id, access_token, refresh_token, merchant_name=None, location_ids=None):
         """Save or update merchant tokens"""
         sheet = self._get_sheet('tokens')
         if not sheet:
@@ -90,13 +90,14 @@ class SquareSync:
         try:
             if not sheet.get_all_values():
                 headers = ['merchant_id', 'access_token', 'refresh_token', 'updated_at', 
-                          'status', 'merchant_name', 'last_sync', 'total_customers']
+                          'status', 'merchant_name', 'last_sync', 'total_customers', 'location_ids']
                 sheet.append_row(headers)
         except:
             pass
         
         records = sheet.get_all_records()
         current_time = datetime.now().isoformat()
+        location_ids_str = ','.join(location_ids) if location_ids else ''
         
         # Update existing or add new
         for i, record in enumerate(records, start=2):
@@ -104,14 +105,15 @@ class SquareSync:
                 # Update existing
                 update_data = [access_token, refresh_token, current_time, 'active', 
                              merchant_name or record.get('merchant_name', ''),
-                             record.get('last_sync', ''), record.get('total_customers', 0)]
-                sheet.update(f'B{i}:H{i}', [update_data])
+                             record.get('last_sync', ''), record.get('total_customers', 0),
+                             location_ids_str or record.get('location_ids', '')]
+                sheet.update(f'B{i}:I{i}', [update_data])
                 print(f"✅ Updated tokens for {merchant_id}")
                 return True
         
         # Add new merchant
         new_row = [merchant_id, access_token, refresh_token, current_time, 
-                   'active', merchant_name or '', '', 0]
+                   'active', merchant_name or '', '', 0, location_ids_str]
         sheet.append_row(new_row)
         print(f"✅ Added new merchant {merchant_id}")
         return True
@@ -167,7 +169,10 @@ class SquareSync:
             new_access_token = token_data.get('access_token')
             new_refresh_token = token_data.get('refresh_token', tokens['refresh_token'])
             
-            if self.save_tokens(merchant_id, new_access_token, new_refresh_token, tokens.get('merchant_name')):
+            # Keep existing location_ids when refreshing tokens
+            existing_location_ids = tokens.get('location_ids', '').split(',') if tokens.get('location_ids') else None
+            if self.save_tokens(merchant_id, new_access_token, new_refresh_token, 
+                              tokens.get('merchant_name'), existing_location_ids):
                 print(f"✅ Refreshed token for {merchant_id}")
                 return True
         
@@ -265,30 +270,39 @@ class SquareSync:
         
         return all_customers
     
-    def fetch_invoices(self, access_token, customer_ids):
+    def fetch_invoices(self, access_token, customer_ids, merchant_id=None):
         """Fetch invoice data for customers"""
         if not customer_ids:
             return {}
         
         print(f"📄 Fetching invoices for {len(customer_ids)} customers")
         
-        # First, get merchant locations (required for invoice search)
-        locations_response = self._make_square_request('v2/locations', access_token)
+        # Try to get location IDs from stored merchant data first
+        location_ids = []
+        if merchant_id:
+            tokens = self.get_tokens(merchant_id)
+            if tokens and tokens.get('location_ids'):
+                location_ids = [l.strip() for l in tokens['location_ids'].split(',') if l.strip()]
+                print(f"✅ Using stored location IDs: {location_ids}")
         
-        if not locations_response or locations_response.status_code != 200:
-            print(f"❌ Failed to get locations: {locations_response.status_code if locations_response else 'No response'}")
-            return {}
-        
-        locations_data = locations_response.json()
-        locations = locations_data.get('locations', [])
-        
-        if not locations:
-            print("❌ No locations found")
-            return {}
-        
-        # Get location IDs
-        location_ids = [loc.get('id') for loc in locations if loc.get('id')]
-        print(f"✅ Found {len(location_ids)} locations: {location_ids}")
+        # Fallback: fetch locations if not stored
+        if not location_ids:
+            print("🔄 Fetching locations (not stored)")
+            locations_response = self._make_square_request('v2/locations', access_token)
+            
+            if not locations_response or locations_response.status_code != 200:
+                print(f"❌ Failed to get locations: {locations_response.status_code if locations_response else 'No response'}")
+                return {}
+            
+            locations_data = locations_response.json()
+            locations = locations_data.get('locations', [])
+            
+            if not locations:
+                print("❌ No locations found")
+                return {}
+            
+            location_ids = [loc.get('id') for loc in locations if loc.get('id')]
+            print(f"✅ Found {len(location_ids)} locations: {location_ids}")
         
         # Now search invoices with proper query structure
         search_data = {
@@ -492,7 +506,7 @@ class SquareSync:
         customer_ids = [c.get('id') for c in customers if c.get('id')]
         print(f"🔍 About to fetch invoices for {len(customer_ids)} customer IDs")
         
-        invoices = self.fetch_invoices(tokens['access_token'], customer_ids)
+        invoices = self.fetch_invoices(tokens['access_token'], customer_ids, merchant_id)
         print(f"🔍 fetch_invoices returned: {len(invoices) if invoices else 0} mappings")
         
         # Merge invoice data - THIS WAS MISSING!
@@ -538,6 +552,25 @@ class SquareSync:
             return days_old >= TOKEN_REFRESH_DAYS
         except:
             return True
+    
+    def fetch_locations(self, access_token):
+        """Fetch merchant locations"""
+        print("📍 Fetching merchant locations")
+        
+        locations_response = self._make_square_request('v2/locations', access_token)
+        
+        if not locations_response or locations_response.status_code != 200:
+            print(f"❌ Failed to get locations: {locations_response.status_code if locations_response else 'No response'}")
+            return []
+        
+        locations_data = locations_response.json()
+        locations = locations_data.get('locations', [])
+        
+        location_ids = [loc.get('id') for loc in locations if loc.get('id')]
+        location_names = [loc.get('name', 'Unnamed') for loc in locations]
+        
+        print(f"✅ Found {len(location_ids)} locations: {location_names}")
+        return location_ids
 
 # Global sync instance
 sync = SquareSync()
@@ -672,8 +705,10 @@ def oauth2callback():
     print(f"Successfully got tokens for merchant: {merchant_id}")
     
     # Continue with the rest of your existing oauth2callback logic...
-    # Get merchant name
+    # Get merchant name and locations
     merchant_name = "Unknown"
+    location_ids = []
+    
     merchant_response = sync._make_square_request('v2/merchants', access_token)
     if merchant_response and merchant_response.status_code == 200:
         merchant_data = merchant_response.json()
@@ -681,8 +716,11 @@ def oauth2callback():
         if merchants:
             merchant_name = merchants[0].get('business_name', 'Unknown')
     
+    # Fetch locations
+    location_ids = sync.fetch_locations(access_token)
+    
     # Save tokens and trigger initial sync
-    if sync.save_tokens(merchant_id, access_token, refresh_token, merchant_name):
+    if sync.save_tokens(merchant_id, access_token, refresh_token, merchant_name, location_ids):
         # Start background sync
         threading.Thread(target=sync.sync_merchant, args=(merchant_id,), daemon=True).start()
         
@@ -693,6 +731,7 @@ def oauth2callback():
             <div style="background: #e8f5e8; padding: 20px; border-radius: 8px; margin: 20px 0;">
                 <p><strong>Business:</strong> {merchant_name}</p>
                 <p><strong>Merchant ID:</strong> {merchant_id}</p>
+                <p><strong>Locations:</strong> {len(location_ids)} found</p>
                 <p><strong>Status:</strong> Initial sync running in background</p>
             </div>
             <div style="text-align: center;">
@@ -726,6 +765,8 @@ def dashboard():
         name = merchant.get('merchant_name', 'Unknown')
         customers = merchant.get('total_customers', 0)
         last_sync = merchant.get('last_sync', 'Never')
+        location_ids = merchant.get('location_ids', '')
+        location_count = len([l for l in location_ids.split(',') if l.strip()]) if location_ids else 0
         
         # Format last sync
         sync_display = 'Never'
@@ -742,6 +783,7 @@ def dashboard():
             <td>{name}</td>
             <td><code>{merchant_id}</code></td>
             <td>{customers:,}</td>
+            <td>{location_count}</td>
             <td>{sync_display}</td>
             <td>
                 <a href="/api/sync/{merchant_id}" style="background: #28a745; color: white; 
@@ -773,6 +815,7 @@ def dashboard():
             <th>Business Name</th>
             <th>Merchant ID</th>
             <th>Customers</th>
+            <th>Locations</th>
             <th>Last Sync</th>
             <th>Actions</th>
         </tr>
