@@ -179,286 +179,109 @@ class SquareSync:
         print(f"❌ Token refresh failed for {merchant_id}")
         return False
     
-    def fetch_customers(self, merchant_id, access_token):
-        """Fetch customers from Square with date filtering"""
-        print(f"👥 Fetching customers for {merchant_id}")
-        
-        # Date filter
-        cutoff_date = (datetime.now() - timedelta(days=CUSTOMER_HISTORY_DAYS)).isoformat() + 'Z'
-        
+    def fetch_customers_simple(self, access_token):
+        """Fetch customers - limit 100, desc by date"""
         search_data = {
-            'limit': 100,
-            'query': {
-                'filter': {
-                    'created_at': {'start_at': cutoff_date}
+            "limit": 100,
+            "query": {
+                "sort": {
+                    "field": "CREATED_AT", 
+                    "order": "DESC"
                 }
             }
         }
         
-        all_customers = []
-        cursor = None
+        response = self._make_square_request('v2/customers/search', access_token, 'POST', search_data)
         
-        while True:
-            if cursor:
-                search_data['cursor'] = cursor
-            
-            response = self._make_square_request('v2/customers/search', access_token, 'POST', search_data)
-            
-            if not response or response.status_code != 200:
-                print(f"⚠️ Customer search failed, trying fallback...")
-                return self._fetch_customers_fallback(access_token)
-            
-            data = response.json()
-            customers = data.get('customers', [])
-            all_customers.extend(self._filter_customers_by_date(customers))
-            
-            cursor = data.get('cursor')
-            if not cursor:
-                break
+        if response and response.status_code == 200:
+            customers = response.json().get('customers', [])
+            print(f"✅ Fetched {len(customers)} customers")
+            return customers
         
-        print(f"✅ Fetched {len(all_customers)} customers")
-        return all_customers
-    
-    def _filter_customers_by_date(self, customers):
-        """Filter customers by date (created or updated in last year)"""
-        cutoff_date = datetime.now() - timedelta(days=CUSTOMER_HISTORY_DAYS)
-        filtered = []
-        
-        for customer in customers:
-            include = False
-            
-            for date_field in ['created_at', 'updated_at']:
-                date_str = customer.get(date_field)
-                if date_str:
-                    try:
-                        date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                        if date_obj.replace(tzinfo=None) >= cutoff_date:
-                            include = True
-                            break
-                    except:
-                        continue
-            
-            if include:
-                filtered.append(customer)
-        
-        return filtered
-    
-    def _fetch_customers_fallback(self, access_token):
-        """Fallback method using regular customers endpoint"""
-        print("🔄 Using fallback customer fetch")
-        
-        all_customers = []
-        cursor = None
-        
-        while True:
-            params = {'limit': 100}
-            if cursor:
-                params['cursor'] = cursor
-            
-            response = self._make_square_request('v2/customers', access_token, data=params)
-            
-            if not response or response.status_code != 200:
-                break
-            
-            data = response.json()
-            customers = data.get('customers', [])
-            all_customers.extend(self._filter_customers_by_date(customers))
-            
-            cursor = data.get('cursor')
-            if not cursor:
-                break
-        
-        return all_customers
-    
-    def fetch_invoices(self, access_token, customer_ids, merchant_id=None):
-        """Fetch invoice data for customers"""
-        if not customer_ids:
-            return {}
-        
-        print(f"📄 Fetching invoices for {len(customer_ids)} customers")
-        
-        # Try to get location IDs from stored merchant data first
-        location_ids = []
-        if merchant_id:
-            tokens = self.get_tokens(merchant_id)
-            if tokens and tokens.get('location_ids'):
-                location_ids = [l.strip() for l in tokens['location_ids'].split(',') if l.strip()]
-                print(f"✅ Using stored location IDs: {location_ids}")
-        
-        # Fallback: fetch locations if not stored
-        if not location_ids:
-            print("🔄 Fetching locations (not stored)")
-            locations_response = self._make_square_request('v2/locations', access_token)
-            
-            if not locations_response or locations_response.status_code != 200:
-                print(f"❌ Failed to get locations: {locations_response.status_code if locations_response else 'No response'}")
-                return {}
-            
-            locations_data = locations_response.json()
-            locations = locations_data.get('locations', [])
-            
-            if not locations:
-                print("❌ No locations found")
-                return {}
-            
-            location_ids = [loc.get('id') for loc in locations if loc.get('id')]
-            print(f"✅ Found {len(location_ids)} locations: {location_ids}")
-        
-        # Now search invoices with proper query structure
-        search_data = {
-            'limit': 100,
-            'query': {
-                'filter': {
-                    'location_ids': location_ids
-                }
-            }
-        }
-        
-        all_invoices = []
-        cursor = None
-        
-        while True:
-            if cursor:
-                search_data['cursor'] = cursor
-            
-            response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
-            
-            if not response or response.status_code != 200:
-                print(f"⚠️ Invoice fetch failed: {response.status_code if response else 'No response'}")
-                if response:
-                    print(f"Error details: {response.text}")
-                return {}
-            
-            data = response.json()
-            invoices = data.get('invoices', [])
-            all_invoices.extend(invoices)
-            print(f"📄 Got {len(invoices)} invoices (total: {len(all_invoices)})")
-            
-            cursor = data.get('cursor')
-            if not cursor:
-                break
-            
-            if len(all_invoices) > 1000:  # Safety limit
-                break
-        
-        print(f"✅ Total invoices found: {len(all_invoices)}")
-        
-        # If no invoices found, return empty dict
-        if not all_invoices:
-            print("❌ No invoices found at all")
-            return {}
-        
-        # Debug first invoice structure
-        first_invoice = all_invoices[0]
-        print(f"🔍 First invoice keys: {list(first_invoice.keys())}")
-        
-        # Map invoices to customers
-        customer_invoices = {}
-        customer_id_set = set(customer_ids)
-        
-        for invoice in all_invoices:
-            # Try multiple ways to get customer ID
-            customer_id = None
-            
-            # Method 1: primary_recipient
-            if 'primary_recipient' in invoice:
-                customer_id = invoice['primary_recipient'].get('customer_id')
-            
-            # Method 2: invoice_recipients
-            if not customer_id and 'invoice_recipients' in invoice:
-                recipients = invoice['invoice_recipients']
-                if recipients:
-                    customer_id = recipients[0].get('customer_id')
-            
-            # Method 3: order -> customer_id
-            if not customer_id and 'order' in invoice:
-                customer_id = invoice['order'].get('customer_id')
-            
-            if customer_id and customer_id in customer_id_set and customer_id not in customer_invoices:
-                # Extract invoice fields safely
-                payment_requests = invoice.get('payment_requests', [])
-                order = invoice.get('order', {})
-                total_money = order.get('total_money', {})
-                
-                customer_invoices[customer_id] = {
-                    'id': invoice.get('id', ''),
-                    'sale_or_service_date': invoice.get('created_at', ''),
-                    'due_date': payment_requests[0].get('due_date', '') if payment_requests else '',
-                    'invoice_status': invoice.get('status', ''),
-                    'invoice_amount': str(total_money.get('amount', 0))
-                }
-        
-        print(f"✅ Matched {len(customer_invoices)} invoices to customers")
-        return customer_invoices
+        print(f"❌ Customer fetch failed")
+        return []
 
-    def save_customer_data(self, merchant_id, customers):
-        """Save customer data to Google Sheets"""
-        sheet_name = f"customers_{merchant_id}"
+    def fetch_invoices_simple(self, access_token, merchant_id):
+        """Fetch invoices - limit 100, desc by date"""
+        location_ids = self._get_location_ids(merchant_id, access_token)
+        if not location_ids:
+            return []
+        
+        search_data = {
+            "limit": 100,
+            "query": {
+                "filter": {"location_ids": location_ids},
+                "sort": {"field": "INVOICE_SORT_DATE", "order": "DESC"}
+            }
+        }
+        
+        response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
+        
+        if response and response.status_code == 200:
+            invoices = response.json().get('invoices', [])
+            print(f"✅ Fetched {len(invoices)} invoices")
+            return invoices
+        
+        print(f"❌ Invoice fetch failed")
+        return []
+
+    def fetch_orders_simple(self, access_token, merchant_id):
+        """Fetch orders - limit 100, desc by date"""
+        location_ids = self._get_location_ids(merchant_id, access_token)
+        if not location_ids:
+            return []
+        
+        search_data = {
+            "limit": 100,
+            "location_ids": location_ids,
+            "query": {
+                "sort": {"sort_field": "CREATED_AT", "sort_order": "DESC"}
+            }
+        }
+        
+        response = self._make_square_request('v2/orders/search', access_token, 'POST', search_data)
+        
+        if response and response.status_code == 200:
+            orders = response.json().get('orders', [])
+            print(f"✅ Fetched {len(orders)} orders")
+            return orders
+        
+        print(f"❌ Order fetch failed")
+        return []
+
+    def save_json_data(self, merchant_id, data_type, data):
+        """Save raw JSON data to Google Sheets"""
+        sheet_name = f"{merchant_id}_{data_type}"
         sheet = self._get_sheet(sheet_name)
         if not sheet:
             return False
         
-        # Clear existing data
-        sheet.clear()
-        
-        # Headers
-        headers = [
-            'customer_id', 'given_name', 'family_name', 'company_name', 'nickname',
-            'email_address', 'phone_number', 'address_line_1', 'address_line_2', 
-            'locality', 'administrative_district_level_1', 'postal_code', 'country',
-            'created_at', 'updated_at', 'birthday', 'note', 'reference_id',
-            'group_ids', 'segment_ids', 'preferences', 'version', 'sync_date',
-            'latest_invoice_id', 'sale_or_service_date', 'due_date', 'invoice_status', 'invoice_amount'
-        ]
-        
-        # Prepare data
-        rows = [headers]
-        for customer in customers:
-            invoice = customer.get('latest_invoice', {})
-            address = customer.get('address', {})
-            
-            row = [
-                customer.get('id', ''),
-                customer.get('given_name', ''),
-                customer.get('family_name', ''),
-                customer.get('company_name', ''),
-                customer.get('nickname', ''),
-                customer.get('email_address', ''),
-                customer.get('phone_number', ''),
-                address.get('address_line_1', ''),
-                address.get('address_line_2', ''),
-                address.get('locality', ''),
-                address.get('administrative_district_level_1', ''),
-                address.get('postal_code', ''),
-                address.get('country', ''),
-                customer.get('created_at', ''),
-                customer.get('updated_at', ''),
-                customer.get('birthday', ''),
-                customer.get('note', ''),
-                customer.get('reference_id', ''),
-                ', '.join(customer.get('group_ids', [])),
-                ', '.join(customer.get('segment_ids', [])),
-                json.dumps(customer.get('preferences', {})) if customer.get('preferences') else '',
-                str(customer.get('version', '')),
-                datetime.now().isoformat(),
-                invoice.get('id', ''),
-                invoice.get('sale_or_service_date', ''),
-                invoice.get('due_date', ''),
-                invoice.get('invoice_status', ''),
-                invoice.get('invoice_amount', '')
-            ]
-            rows.append(row)
-        
-        # Save to sheets
         try:
-            range_name = f'A1:{self._get_column_letter(len(headers))}{len(rows)}'
-            sheet.update(values=rows, range_name=range_name)
-            print(f"✅ Saved {len(rows)-1} customers to {sheet_name}")
+            # Clear and add headers
+            sheet.clear()
+            headers = ['timestamp', 'data_type', 'count', 'json_data']
+            
+            # Save metadata and JSON
+            timestamp = datetime.now().isoformat()
+            json_data = json.dumps(data, indent=2)
+            row = [timestamp, data_type, len(data), json_data]
+            
+            sheet.update('A1:D2', [headers, row])
+            print(f"✅ Saved {len(data)} {data_type} records as JSON")
             return True
+            
         except Exception as e:
-            print(f"❌ Save error: {e}")
+            print(f"❌ JSON save error for {data_type}: {e}")
             return False
-    
+
+    def _get_location_ids(self, merchant_id, access_token):
+        """Helper to get location IDs"""
+        tokens = self.get_tokens(merchant_id)
+        if tokens and tokens.get('location_ids'):
+            return [l.strip() for l in tokens['location_ids'].split(',') if l.strip()]
+        
+        return self.fetch_locations(access_token)
+
     def _get_column_letter(self, col_num):
         """Convert column number to Excel letter (A, B, ..., AA, AB...)"""
         result = ""
@@ -485,48 +308,35 @@ class SquareSync:
         return False
     
     def sync_merchant(self, merchant_id):
-        """Complete sync process for one merchant"""
-        print(f"🚀 Starting sync for {merchant_id}")
+        """Simplified sync: fetch raw data and save as JSON"""
+        print(f"🚀 Starting simplified sync for {merchant_id}")
         
-        # Get tokens
         tokens = self.get_tokens(merchant_id)
         if not tokens:
             print(f"❌ No tokens found for {merchant_id}")
             return False
         
-        # Fetch customers
-        customers = self.fetch_customers(merchant_id, tokens['access_token'])
-        if not customers:
-            print(f"❌ No customers fetched for {merchant_id}")
-            return False
+        access_token = tokens['access_token']
         
-        print(f"✅ Got {len(customers)} customers")
+        # Fetch raw data (limit 100 each, desc by date)
+        customers = self.fetch_customers_simple(access_token)
+        invoices = self.fetch_invoices_simple(access_token, merchant_id)
+        orders = self.fetch_orders_simple(access_token, merchant_id)
         
-        # Fetch invoices - THIS WAS MISSING!
-        customer_ids = [c.get('id') for c in customers if c.get('id')]
-        print(f"🔍 About to fetch invoices for {len(customer_ids)} customer IDs")
+        # Save each dataset as JSON
+        save_success = (
+            self.save_json_data(merchant_id, 'customers', customers) and
+            self.save_json_data(merchant_id, 'invoices', invoices) and
+            self.save_json_data(merchant_id, 'orders', orders)
+        )
         
-        invoices = self.fetch_invoices(tokens['access_token'], customer_ids, merchant_id)
-        print(f"🔍 fetch_invoices returned: {len(invoices) if invoices else 0} mappings")
-        
-        # Merge invoice data - THIS WAS MISSING!
-        customers_with_invoices = 0
-        for customer in customers:
-            customer_id = customer.get('id')
-            if customer_id and customer_id in invoices:
-                customer['latest_invoice'] = invoices[customer_id]
-                customers_with_invoices += 1
-                print(f"✅ Added invoice to customer {customer_id}")
-        
-        print(f"🔗 Final: {customers_with_invoices} customers have invoice data")
-        
-        # Save data
-        if self.save_customer_data(merchant_id, customers):
-            self.update_sync_status(merchant_id, len(customers))
-            print(f"✅ Sync complete for {merchant_id}: {len(customers)} customers")
+        if save_success:
+            total_records = len(customers) + len(invoices) + len(orders)
+            self.update_sync_status(merchant_id, total_records)
+            print(f"✅ Sync complete: {len(customers)} customers, {len(invoices)} invoices, {len(orders)} orders")
             return True
         
-        print(f"❌ Failed to save data for {merchant_id}")
+        print(f"❌ Save failed for {merchant_id}")
         return False
 
     def should_sync(self, last_sync):
