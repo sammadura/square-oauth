@@ -202,7 +202,7 @@ class SquareSync:
         return []
 
     def fetch_invoices_simple(self, access_token, merchant_id):
-        """Fetch invoices - limit 100, desc by date"""
+        """Fetch invoices with location error handling"""
         location_ids = self._get_location_ids(merchant_id, access_token)
         if not location_ids:
             return []
@@ -217,16 +217,31 @@ class SquareSync:
         
         response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
         
+        # If location IDs are invalid, fetch fresh ones and retry
+        if response and response.status_code == 400:
+            print("Invalid location IDs, fetching fresh ones...")
+            fresh_location_ids = self.fetch_locations(access_token)
+            if fresh_location_ids:
+                # Update stored location IDs
+                tokens = self.get_tokens(merchant_id)
+                if tokens:
+                    self.save_tokens(merchant_id, tokens['access_token'], tokens['refresh_token'], 
+                                tokens.get('merchant_name'), fresh_location_ids)
+                
+                # Retry with fresh location IDs
+                search_data["query"]["filter"]["location_ids"] = fresh_location_ids
+                response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
+        
         if response and response.status_code == 200:
             invoices = response.json().get('invoices', [])
-            print(f"✅ Fetched {len(invoices)} invoices")
+            print(f"Fetched {len(invoices)} invoices")
             return invoices
         
-        print(f"❌ Invoice fetch failed")
+        print(f"Invoice fetch failed: {response.status_code if response else 'No response'}")
         return []
 
     def fetch_orders_simple(self, access_token, merchant_id):
-        """Fetch orders - limit 100, desc by date"""
+        """Fetch orders with location and permission error handling"""
         location_ids = self._get_location_ids(merchant_id, access_token)
         if not location_ids:
             return []
@@ -241,12 +256,25 @@ class SquareSync:
         
         response = self._make_square_request('v2/orders/search', access_token, 'POST', search_data)
         
+        # Handle invalid location IDs
+        if response and response.status_code == 400:
+            print("Invalid location IDs for orders, fetching fresh ones...")
+            fresh_location_ids = self.fetch_locations(access_token)
+            if fresh_location_ids:
+                search_data["location_ids"] = fresh_location_ids
+                response = self._make_square_request('v2/orders/search', access_token, 'POST', search_data)
+        
+        # Handle permission errors gracefully
+        if response and response.status_code == 403:
+            print("Orders permission denied - skipping orders")
+            return []  # Don't fail entire sync for missing orders permission
+        
         if response and response.status_code == 200:
             orders = response.json().get('orders', [])
-            print(f"✅ Fetched {len(orders)} orders")
+            print(f"Fetched {len(orders)} orders")
             return orders
         
-        print(f"❌ Order fetch failed")
+        print(f"Order fetch failed: {response.status_code if response else 'No response'}")
         return []
 
     def save_json_data(self, merchant_id, data_type, data):
@@ -672,7 +700,7 @@ def manual_sync(merchant_id):
 def export_csv(merchant_id):
     """Export customer data as CSV"""
     try:
-        sheet_name = f"customers_{merchant_id}"
+        sheet_name = f"{merchant_id}_customers"
         sheet = sync._get_sheet(sheet_name, create_if_missing=False)
         
         if not sheet:
@@ -687,7 +715,7 @@ def export_csv(merchant_id):
         writer = csv.writer(output)
         writer.writerows(data)
         
-        filename = f'customers_{merchant_id}_{datetime.now().strftime("%Y%m%d")}.csv'
+        filename = f'{merchant_id}_customers_{datetime.now().strftime("%Y%m%d")}.csv'
         
         return Response(
             output.getvalue(),
