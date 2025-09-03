@@ -222,7 +222,7 @@ class SquareSync:
             print("Invalid location IDs, fetching fresh ones...")
             fresh_location_ids = self.fetch_locations(access_token)
             if fresh_location_ids:
-                # Update stored location IDs
+                # Update stored location IDs for next time
                 tokens = self.get_tokens(merchant_id)
                 if tokens:
                     self.save_tokens(merchant_id, tokens['access_token'], tokens['refresh_token'], 
@@ -241,7 +241,7 @@ class SquareSync:
         return []
 
     def fetch_orders_simple(self, access_token, merchant_id):
-        """Fetch orders with location and permission error handling"""
+        """Fetch orders with permission error handling"""
         location_ids = self._get_location_ids(merchant_id, access_token)
         if not location_ids:
             return []
@@ -256,18 +256,10 @@ class SquareSync:
         
         response = self._make_square_request('v2/orders/search', access_token, 'POST', search_data)
         
-        # Handle invalid location IDs
-        if response and response.status_code == 400:
-            print("Invalid location IDs for orders, fetching fresh ones...")
-            fresh_location_ids = self.fetch_locations(access_token)
-            if fresh_location_ids:
-                search_data["location_ids"] = fresh_location_ids
-                response = self._make_square_request('v2/orders/search', access_token, 'POST', search_data)
-        
         # Handle permission errors gracefully
         if response and response.status_code == 403:
-            print("Orders permission denied - skipping orders")
-            return []  # Don't fail entire sync for missing orders permission
+            print("Orders permission denied - continuing without orders")
+            return []  # Return empty list instead of failing
         
         if response and response.status_code == 200:
             orders = response.json().get('orders', [])
@@ -294,7 +286,7 @@ class SquareSync:
             json_data = json.dumps(data, indent=2)
             row = [timestamp, data_type, len(data), json_data]
             
-            sheet.update('A1:D2', [headers, row])
+            sheet.update(values=[headers, row], range_name='A1:D2')
             print(f"✅ Saved {len(data)} {data_type} records as JSON")
             return True
             
@@ -337,34 +329,33 @@ class SquareSync:
     
     def sync_merchant(self, merchant_id):
         """Simplified sync: fetch raw data and save as JSON"""
-        print(f"🚀 Starting simplified sync for {merchant_id}")
+        print(f"Starting simplified sync for {merchant_id}")
         
         tokens = self.get_tokens(merchant_id)
         if not tokens:
-            print(f"❌ No tokens found for {merchant_id}")
+            print(f"No tokens found for {merchant_id}")
             return False
         
         access_token = tokens['access_token']
         
-        # Fetch raw data (limit 100 each, desc by date)
+        # Fetch raw data (continue even if some fail)
         customers = self.fetch_customers_simple(access_token)
         invoices = self.fetch_invoices_simple(access_token, merchant_id)
         orders = self.fetch_orders_simple(access_token, merchant_id)
         
-        # Save each dataset as JSON
-        save_success = (
-            self.save_json_data(merchant_id, 'customers', customers) and
-            self.save_json_data(merchant_id, 'invoices', invoices) and
-            self.save_json_data(merchant_id, 'orders', orders)
-        )
+        # Save each dataset independently
+        customers_saved = self.save_json_data(merchant_id, 'customers', customers) if customers else False
+        invoices_saved = self.save_json_data(merchant_id, 'invoices', invoices) if invoices else False
+        orders_saved = self.save_json_data(merchant_id, 'orders', orders) if orders else False
         
-        if save_success:
+        # Consider sync successful if at least customers were saved
+        if customers_saved:
             total_records = len(customers) + len(invoices) + len(orders)
             self.update_sync_status(merchant_id, total_records)
-            print(f"✅ Sync complete: {len(customers)} customers, {len(invoices)} invoices, {len(orders)} orders")
+            print(f"Sync complete: {len(customers)} customers, {len(invoices)} invoices, {len(orders)} orders")
             return True
         
-        print(f"❌ Save failed for {merchant_id}")
+        print(f"Sync failed - no valid data for {merchant_id}")
         return False
 
     def should_sync(self, last_sync):
