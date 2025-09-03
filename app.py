@@ -217,7 +217,7 @@ class SquareSync:
                         tokens.get('merchant_name'), fresh_location_ids)
         
         search_data = {
-            "limit": 100,
+            "limit": 200,  # Changed from 100 to 200
             "query": {
                 "filter": {"location_ids": fresh_location_ids},
                 "sort": {"field": "INVOICE_SORT_DATE", "order": "DESC"}
@@ -243,7 +243,7 @@ class SquareSync:
             return []
         
         search_data = {
-            "limit": 100,
+            "limit": 500,  # Changed from 100 to 500
             "location_ids": location_ids,
             "query": {
                 "sort": {"sort_field": "CREATED_AT", "sort_order": "DESC"}
@@ -259,10 +259,10 @@ class SquareSync:
         
         if response and response.status_code == 200:
             orders = response.json().get('orders', [])
-            print(f"Fetched {len(orders)} orders")
+            print(f"✅ Fetched {len(orders)} orders")
             return orders
         
-        print(f"Order fetch failed: {response.status_code if response else 'No response'}")
+        print(f"❌ Order fetch failed: {response.status_code if response else 'No response'}")
         return []
 
     def save_json_data(self, merchant_id, data_type, data):
@@ -313,12 +313,12 @@ class SquareSync:
                 return True
                 
             elif data_type == 'invoices' and data:
-                # Save invoices with useful fields
+                # Save invoices with useful fields - up to 200 records
                 headers = ['id', 'customer_id', 'sale_or_service_date', 'invoice_number', 
                         'title', 'status', 'total_amount', 'created_at']
                 rows = [headers]
                 
-                for invoice in data[:100]:  # Limit to 100 records
+                for invoice in data[:200]:  # Increased from 100 to 200
                     # Get total amount from payment_requests
                     total_money = {}
                     payment_requests = invoice.get('payment_requests', [])
@@ -341,21 +341,28 @@ class SquareSync:
                     ]
                     rows.append(row)
                 
-                # Update all at once (up to 101 rows including header)
-                if len(rows) > 1:
-                    end_col = self._get_column_letter(len(headers))
-                    sheet.update(f'A1:{end_col}{len(rows)}', rows)
+                # Update in batches for large datasets
+                batch_size = 100
+                for i in range(0, len(rows), batch_size):
+                    batch = rows[i:i+batch_size]
+                    if i == 0:
+                        # First batch includes headers
+                        end_col = self._get_column_letter(len(headers))
+                        sheet.update(f'A{i+1}:{end_col}{i+len(batch)}', batch)
+                    else:
+                        # Subsequent batches append data
+                        sheet.append_rows(batch[1:])
                 
-                print(f"✅ Saved {len(data)} {data_type} records")
+                print(f"✅ Saved {min(len(data), 200)} {data_type} records")
                 return True
                 
             elif data_type == 'orders' and data:
-                # Save orders with useful fields including line item notes
+                # Save orders with useful fields - up to 500 records
                 headers = ['id', 'customer_id', 'line_item_notes', 'state', 
                         'total_amount', 'source', 'created_at', 'location_id']
                 rows = [headers]
                 
-                for order in data[:100]:  # Limit to 100 records
+                for order in data[:500]:  # Increased from 100 to 500
                     # Extract notes from line_items
                     line_items = order.get('line_items', [])
                     notes = []
@@ -389,12 +396,19 @@ class SquareSync:
                     ]
                     rows.append(row)
                 
-                # Update all at once (up to 101 rows including header)
-                if len(rows) > 1:
-                    end_col = self._get_column_letter(len(headers))
-                    sheet.update(f'A1:{end_col}{len(rows)}', rows)
+                # Update in batches for large datasets
+                batch_size = 100
+                for i in range(0, len(rows), batch_size):
+                    batch = rows[i:i+batch_size]
+                    if i == 0:
+                        # First batch includes headers
+                        end_col = self._get_column_letter(len(headers))
+                        sheet.update(f'A{i+1}:{end_col}{i+len(batch)}', batch)
+                    else:
+                        # Subsequent batches append data
+                        sheet.append_rows(batch[1:])
                 
-                print(f"✅ Saved {len(data)} {data_type} records")
+                print(f"✅ Saved {min(len(data), 500)} {data_type} records")
                 return True
             
             return False
