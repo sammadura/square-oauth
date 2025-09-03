@@ -313,42 +313,86 @@ class SquareSync:
                 return True
                 
             elif data_type == 'invoices' and data:
-                # Save invoices with only the fields you need
-                headers = ['id', 'customer_id', 'sale_or_service_date']
+                # Save invoices with useful fields
+                headers = ['id', 'customer_id', 'sale_or_service_date', 'invoice_number', 
+                        'title', 'status', 'total_amount', 'created_at']
                 rows = [headers]
                 
                 for invoice in data[:100]:  # Limit to 100 records
-                    # Get sale_or_service_date from the invoice
-                    sale_or_service_date = invoice.get('sale_or_service_date', '')
+                    # Get total amount from payment_requests
+                    total_money = {}
+                    payment_requests = invoice.get('payment_requests', [])
+                    if payment_requests:
+                        total_money = payment_requests[0].get('total_money', {})
+                    
+                    amount_str = ''
+                    if total_money.get('amount'):
+                        amount_str = f"{total_money.get('amount', 0)/100:.2f} {total_money.get('currency', 'USD')}"
                     
                     row = [
                         invoice.get('id', ''),
                         invoice.get('primary_recipient', {}).get('customer_id', ''),
-                        sale_or_service_date
+                        invoice.get('sale_or_service_date', ''),
+                        invoice.get('invoice_number', ''),
+                        invoice.get('title', ''),
+                        invoice.get('status', ''),
+                        amount_str,
+                        invoice.get('created_at', '')
                     ]
                     rows.append(row)
                 
                 # Update all at once (up to 101 rows including header)
-                sheet.update(f'A1:C{len(rows)}', rows)
+                if len(rows) > 1:
+                    end_col = self._get_column_letter(len(headers))
+                    sheet.update(f'A1:{end_col}{len(rows)}', rows)
                 
                 print(f"✅ Saved {len(data)} {data_type} records")
                 return True
                 
             elif data_type == 'orders' and data:
-                # Save orders with only the fields you need
-                headers = ['id', 'customer_id', 'note']
+                # Save orders with useful fields including line item notes
+                headers = ['id', 'customer_id', 'line_item_notes', 'state', 
+                        'total_amount', 'source', 'created_at', 'location_id']
                 rows = [headers]
                 
                 for order in data[:100]:  # Limit to 100 records
+                    # Extract notes from line_items
+                    line_items = order.get('line_items', [])
+                    notes = []
+                    for item in line_items:
+                        note = item.get('note', '')
+                        if note:
+                            notes.append(note)
+                    
+                    # Join all notes with semicolon separator
+                    combined_notes = '; '.join(notes) if notes else ''
+                    
+                    # Get total money
+                    total_money = order.get('total_money', {})
+                    amount_str = ''
+                    if total_money.get('amount'):
+                        amount_str = f"{total_money.get('amount', 0)/100:.2f} {total_money.get('currency', 'USD')}"
+                    
+                    # Get source name
+                    source = order.get('source', {})
+                    source_name = source.get('name', '')
+                    
                     row = [
                         order.get('id', ''),
                         order.get('customer_id', ''),
-                        order.get('note', '')
+                        combined_notes,
+                        order.get('state', ''),
+                        amount_str,
+                        source_name,
+                        order.get('created_at', ''),
+                        order.get('location_id', '')
                     ]
                     rows.append(row)
                 
                 # Update all at once (up to 101 rows including header)
-                sheet.update(f'A1:C{len(rows)}', rows)
+                if len(rows) > 1:
+                    end_col = self._get_column_letter(len(headers))
+                    sheet.update(f'A1:{end_col}{len(rows)}', rows)
                 
                 print(f"✅ Saved {len(data)} {data_type} records")
                 return True
