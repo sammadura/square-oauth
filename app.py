@@ -392,6 +392,9 @@ class SquareSync:
             
             # For customers, save in a tabular format
             if data_type == 'customers' and data:
+                # Clear existing data first
+                sheet.clear()
+                
                 # First, gather all invoice and order dates by customer_id
                 invoice_dates_by_customer = {}
                 order_dates_by_customer = {}
@@ -409,6 +412,7 @@ class SquareSync:
                                 if customer_id not in invoice_dates_by_customer:
                                     invoice_dates_by_customer[customer_id] = []
                                 invoice_dates_by_customer[customer_id].append(latest_date)
+                        print(f"📊 Found invoice dates for {len(invoice_dates_by_customer)} customers")
                 except Exception as e:
                     print(f"⚠️ Could not fetch invoice dates: {e}")
                 
@@ -425,6 +429,7 @@ class SquareSync:
                                 if customer_id not in order_dates_by_customer:
                                     order_dates_by_customer[customer_id] = []
                                 order_dates_by_customer[customer_id].append(extracted_date)
+                        print(f"📊 Found order dates for {len(order_dates_by_customer)} customers")
                 except Exception as e:
                     print(f"⚠️ Could not fetch order dates: {e}")
                 
@@ -432,7 +437,9 @@ class SquareSync:
                 headers = ['id', 'given_name', 'family_name', 'email', 'phone_number', 
                         'company_name', 'created_at', 'updated_at', 'birthday', 'note', 'latest_activity_date']
                 
-                rows = [headers]
+                rows = []
+                rows.append(headers)  # Add headers as first row
+                
                 for customer in data:
                     customer_id = customer.get('id', '')
                     
@@ -487,18 +494,18 @@ class SquareSync:
                     ]
                     rows.append(row)
                 
-                # Update in batches to avoid API limits
-                batch_size = 100
-                for i in range(0, len(rows), batch_size):
-                    batch = rows[i:i+batch_size]
-                    if i == 0:
-                        # First batch includes headers - now with 11 columns (A through K)
-                        sheet.update(f'A{i+1}:K{i+len(batch)}', batch)
-                    else:
-                        # Subsequent batches append data
-                        sheet.append_rows(batch[1:])  # Skip header row in subsequent batches
+                # Write all data at once, ensuring we cover all 11 columns
+                if rows:
+                    # Calculate the range - we need to ensure column K is included
+                    num_rows = len(rows)
+                    num_cols = len(headers)
+                    end_col = self._get_column_letter(num_cols)  # Should be 'K' for 11 columns
+                    
+                    # Update the entire range at once
+                    cell_range = f'A1:{end_col}{num_rows}'
+                    sheet.update(cell_range, rows)
+                    print(f"✅ Saved {len(data)} {data_type} records with activity dates to range {cell_range}")
                 
-                print(f"✅ Saved {len(data)} {data_type} records with activity dates")
                 return True
                 
             elif data_type == 'invoices' and data:
