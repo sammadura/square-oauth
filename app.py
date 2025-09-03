@@ -202,42 +202,38 @@ class SquareSync:
         return []
 
     def fetch_invoices_simple(self, access_token, merchant_id):
-        """Fetch invoices with location error handling"""
-        location_ids = self._get_location_ids(merchant_id, access_token)
-        if not location_ids:
+        """Fetch invoices with better location error handling"""
+        # Always fetch fresh location IDs first to avoid using stale ones
+        fresh_location_ids = self.fetch_locations(access_token)
+        
+        if not fresh_location_ids:
+            print("No valid location IDs found, skipping invoices")
             return []
+        
+        # Update stored location IDs for future use
+        tokens = self.get_tokens(merchant_id)
+        if tokens:
+            self.save_tokens(merchant_id, tokens['access_token'], tokens['refresh_token'], 
+                        tokens.get('merchant_name'), fresh_location_ids)
         
         search_data = {
             "limit": 100,
             "query": {
-                "filter": {"location_ids": location_ids},
+                "filter": {"location_ids": fresh_location_ids},
                 "sort": {"field": "INVOICE_SORT_DATE", "order": "DESC"}
             }
         }
         
         response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
         
-        # If location IDs are invalid, fetch fresh ones and retry
-        if response and response.status_code == 400:
-            print("Invalid location IDs, fetching fresh ones...")
-            fresh_location_ids = self.fetch_locations(access_token)
-            if fresh_location_ids:
-                # Update stored location IDs for next time
-                tokens = self.get_tokens(merchant_id)
-                if tokens:
-                    self.save_tokens(merchant_id, tokens['access_token'], tokens['refresh_token'], 
-                                tokens.get('merchant_name'), fresh_location_ids)
-                
-                # Retry with fresh location IDs
-                search_data["query"]["filter"]["location_ids"] = fresh_location_ids
-                response = self._make_square_request('v2/invoices/search', access_token, 'POST', search_data)
-        
         if response and response.status_code == 200:
             invoices = response.json().get('invoices', [])
-            print(f"Fetched {len(invoices)} invoices")
+            print(f"✅ Fetched {len(invoices)} invoices")
             return invoices
         
-        print(f"Invoice fetch failed: {response.status_code if response else 'No response'}")
+        print(f"❌ Invoice fetch failed: {response.status_code if response else 'No response'}")
+        if response:
+            print(f"Response: {response.text}")
         return []
 
     def fetch_orders_simple(self, access_token, merchant_id):
@@ -270,28 +266,91 @@ class SquareSync:
         return []
 
     def save_json_data(self, merchant_id, data_type, data):
-        """Save raw JSON data to Google Sheets"""
+        """Save data to Google Sheets in a more reliable way"""
         sheet_name = f"{merchant_id}_{data_type}"
         sheet = self._get_sheet(sheet_name)
         if not sheet:
             return False
         
         try:
-            # Clear and add headers
+            # Clear existing data
             sheet.clear()
-            headers = ['timestamp', 'data_type', 'count', 'json_data']
             
-            # Save metadata and JSON
-            timestamp = datetime.now().isoformat()
-            json_data = json.dumps(data, indent=2)
-            row = [timestamp, data_type, len(data), json_data]
+            # For customers, save in a tabular format instead of JSON blob
+            if data_type == 'customers' and data:
+                # Extract customer fields
+                headers = ['id', 'given_name', 'family_name', 'email', 'phone_number', 
+                        'company_name', 'created_at', 'updated_at', 'birthday', 'note']
+                
+                rows = [headers]
+                for customer in data:
+                    row = [
+                        customer.get('id', ''),
+                        customer.get('given_name', ''),
+                        customer.get('family_name', ''),
+                        customer.get('email_address', ''),
+                        customer.get('phone_number', ''),
+                        customer.get('company_name', ''),
+                        customer.get('created_at', ''),
+                        customer.get('updated_at', ''),
+                        customer.get('birthday', ''),
+                        customer.get('note', '')
+                    ]
+                    rows.append(row)
+                
+                # Update in batches to avoid API limits
+                batch_size = 100
+                for i in range(0, len(rows), batch_size):
+                    batch = rows[i:i+batch_size]
+                    if i == 0:
+                        # First batch includes headers
+                        sheet.update(f'A{i+1}:J{i+len(batch)}', batch)
+                    else:
+                        # Subsequent batches append data
+                        sheet.append_rows(batch[1:])  # Skip header row in subsequent batches
+                
+                print(f"✅ Saved {len(data)} {data_type} records")
+                return True
+                
+            elif data:
+                # For invoices and orders, save as structured data
+                # Save summary info and first few records
+                headers = ['timestamp', 'data_type', 'count', 'sample_ids']
+                timestamp = datetime.now().isoformat()
+                
+                # Get first 10 IDs as sample
+                sample_ids = [item.get('id', '') for item in data[:10]]
+                sample_ids_str = ', '.join(sample_ids)
+                
+                row = [timestamp, data_type, len(data), sample_ids_str]
+                
+                sheet.update('A1:D2', [headers, row])
+                
+                # Save detailed data starting from row 4
+                if data_type == 'invoices':
+                    detail_headers = ['id', 'invoice_number', 'title', 'status', 'total_amount', 'created_at']
+                    detail_rows = [detail_headers]
+                    for invoice in data[:50]:  # Limit to first 50
+                        total = invoice.get('payment_requests', [{}])[0].get('total_money', {})
+                        row = [
+                            invoice.get('id', ''),
+                            invoice.get('invoice_number', ''),
+                            invoice.get('title', ''),
+                            invoice.get('status', ''),
+                            f"{total.get('amount', 0)/100:.2f}" if total.get('amount') else '0',
+                            invoice.get('created_at', '')
+                        ]
+                        detail_rows.append(row)
+                    
+                    sheet.update(f'A4:F{4+len(detail_rows)}', detail_rows)
+                    
+                print(f"✅ Saved {len(data)} {data_type} records")
+                return True
             
-            sheet.update(values=[headers, row], range_name='A1:D2')
-            print(f"✅ Saved {len(data)} {data_type} records as JSON")
-            return True
-            
+            return False
+                
         except Exception as e:
-            print(f"❌ JSON save error for {data_type}: {e}")
+            print(f"❌ Save error for {data_type}: {str(e)}")
             return False
 
     def _get_location_ids(self, merchant_id, access_token):
@@ -328,34 +387,74 @@ class SquareSync:
         return False
     
     def sync_merchant(self, merchant_id):
-        """Simplified sync: fetch raw data and save as JSON"""
-        print(f"Starting simplified sync for {merchant_id}")
+        """Simplified sync with better error handling"""
+        print(f"🔄 Starting sync for {merchant_id}")
         
         tokens = self.get_tokens(merchant_id)
         if not tokens:
-            print(f"No tokens found for {merchant_id}")
+            print(f"❌ No tokens found for {merchant_id}")
             return False
         
         access_token = tokens['access_token']
+        success_count = 0
         
-        # Fetch raw data (continue even if some fail)
-        customers = self.fetch_customers_simple(access_token)
-        invoices = self.fetch_invoices_simple(access_token, merchant_id)
-        orders = self.fetch_orders_simple(access_token, merchant_id)
+        # Fetch and save customers
+        try:
+            customers = self.fetch_customers_simple(access_token)
+            if customers:
+                if self.save_json_data(merchant_id, 'customers', customers):
+                    success_count += 1
+                    print(f"✅ Customers: {len(customers)} saved")
+            else:
+                print("⚠️ No customers fetched")
+        except Exception as e:
+            print(f"❌ Customer sync error: {e}")
         
-        # Save each dataset independently
-        customers_saved = self.save_json_data(merchant_id, 'customers', customers) if customers else False
-        invoices_saved = self.save_json_data(merchant_id, 'invoices', invoices) if invoices else False
-        orders_saved = self.save_json_data(merchant_id, 'orders', orders) if orders else False
+        # Fetch and save invoices (with fresh location IDs)
+        try:
+            invoices = self.fetch_invoices_simple(access_token, merchant_id)
+            if invoices:
+                if self.save_json_data(merchant_id, 'invoices', invoices):
+                    success_count += 1
+                    print(f"✅ Invoices: {len(invoices)} saved")
+            else:
+                print("⚠️ No invoices fetched")
+        except Exception as e:
+            print(f"❌ Invoice sync error: {e}")
         
-        # Consider sync successful if at least customers were saved
-        if customers_saved:
-            total_records = len(customers) + len(invoices) + len(orders)
+        # Try orders but don't fail if no permission
+        try:
+            orders = self.fetch_orders_simple(access_token, merchant_id)
+            if orders:
+                if self.save_json_data(merchant_id, 'orders', orders):
+                    success_count += 1
+                    print(f"✅ Orders: {len(orders)} saved")
+            else:
+                print("⚠️ No orders fetched (may lack permission)")
+        except Exception as e:
+            print(f"⚠️ Order sync skipped: {e}")
+        
+        # Update sync status if at least one data type was saved
+        if success_count > 0:
+            total_records = len(customers) if 'customers' in locals() else 0
             self.update_sync_status(merchant_id, total_records)
-            print(f"Sync complete: {len(customers)} customers, {len(invoices)} invoices, {len(orders)} orders")
+            print(f"✅ Sync completed: {success_count}/3 data types saved")
             return True
         
-        print(f"Sync failed - no valid data for {merchant_id}")
+        print(f"❌ Sync failed - no data saved for {merchant_id}")
+        return False
+
+    def clear_location_ids(self, merchant_id):
+        """Clear stored location IDs to force refresh"""
+        tokens = self.get_tokens(merchant_id)
+        if tokens:
+            return self.save_tokens(
+                merchant_id, 
+                tokens['access_token'], 
+                tokens['refresh_token'], 
+                tokens.get('merchant_name'),
+                []  # Clear location IDs
+            )
         return False
 
     def should_sync(self, last_sync):
