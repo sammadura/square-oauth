@@ -40,6 +40,101 @@ class SquareSync:
             
         except Exception as e:
             print(f"❌ Google Sheets init error: {e}")
+
+    def _extract_latest_date(self, text):
+        """Extract all dates from text and return the latest one"""
+        if not text:
+            return ''
+        
+        import re
+        from datetime import datetime
+        
+        dates_found = []
+        
+        # Pattern for MM/DD/YY or MM-DD-YY or M/D/YY (2-digit year)
+        pattern1 = r'\b(\d{1,2})[/-](\d{1,2})[/-](\d{2})\b'
+        matches1 = re.findall(pattern1, text)
+        for match in matches1:
+            try:
+                month, day, year = match
+                # Convert 2-digit year to 4-digit (assume 2000s)
+                year_full = 2000 + int(year)
+                date_obj = datetime(year_full, int(month), int(day))
+                dates_found.append(date_obj)
+            except:
+                continue
+        
+        # Pattern for MM/DD/YYYY or MM-DD-YYYY (4-digit year)
+        pattern2 = r'\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b'
+        matches2 = re.findall(pattern2, text)
+        for match in matches2:
+            try:
+                month, day, year = match
+                date_obj = datetime(int(year), int(month), int(day))
+                dates_found.append(date_obj)
+            except:
+                continue
+        
+        # Pattern for YYYY-MM-DD or YYYY/MM/DD
+        pattern3 = r'\b(\d{4})[/-](\d{1,2})[/-](\d{1,2})\b'
+        matches3 = re.findall(pattern3, text)
+        for match in matches3:
+            try:
+                year, month, day = match
+                date_obj = datetime(int(year), int(month), int(day))
+                dates_found.append(date_obj)
+            except:
+                continue
+        
+        # Pattern for Month YYYY (like "Sep 2025")
+        months = r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|July|August|September|October|November|December)'
+        pattern4 = months + r'\s+(\d{4})'
+        matches4 = re.findall(pattern4, text, re.IGNORECASE)
+        month_map = {
+            'jan': 1, 'january': 1, 'feb': 2, 'february': 2, 'mar': 3, 'march': 3,
+            'apr': 4, 'april': 4, 'may': 5, 'jun': 6, 'june': 6,
+            'jul': 7, 'july': 7, 'aug': 8, 'august': 8, 'sep': 9, 'september': 9,
+            'oct': 10, 'october': 10, 'nov': 11, 'november': 11, 'dec': 12, 'december': 12
+        }
+        for match in matches4:
+            try:
+                month_str, year = match
+                month = month_map[month_str.lower()]
+                # Use first day of month when only month/year is given
+                date_obj = datetime(int(year), month, 1)
+                dates_found.append(date_obj)
+            except:
+                continue
+        
+        # Pattern for Month DD, YYYY or Month DD YYYY
+        pattern5 = months + r'\s+(\d{1,2}),?\s+(\d{4})'
+        matches5 = re.findall(pattern5, text, re.IGNORECASE)
+        for match in matches5:
+            try:
+                month_str, day, year = match
+                month = month_map[month_str.lower()]
+                date_obj = datetime(int(year), month, int(day))
+                dates_found.append(date_obj)
+            except:
+                continue
+        
+        # Pattern for "Service date M/D" (month/day without year - assume current year)
+        pattern6 = r'(?:Service date|date)\s+(\d{1,2})[/-](\d{1,2})(?!\d)'
+        matches6 = re.findall(pattern6, text, re.IGNORECASE)
+        current_year = datetime.now().year
+        for match in matches6:
+            try:
+                month, day = match
+                date_obj = datetime(current_year, int(month), int(day))
+                dates_found.append(date_obj)
+            except:
+                continue
+        
+        if dates_found:
+            latest_date = max(dates_found)
+            return latest_date.strftime('%Y-%m-%d')
+        
+        return ''
     
     def _get_sheet(self, sheet_name, create_if_missing=True):
         """Get or create a Google Sheet"""
@@ -315,7 +410,7 @@ class SquareSync:
             elif data_type == 'invoices' and data:
                 # Save invoices with useful fields - up to 200 records
                 headers = ['id', 'customer_id', 'sale_or_service_date', 'invoice_number', 
-                        'title', 'status', 'total_amount', 'created_at']
+                        'title', 'status', 'total_amount', 'created_at', 'latest_date']  # Added 'latest_date'
                 rows = [headers]
                 
                 for invoice in data[:200]:  # Increased from 100 to 200
@@ -329,15 +424,26 @@ class SquareSync:
                     if total_money.get('amount'):
                         amount_str = f"{total_money.get('amount', 0)/100:.2f} {total_money.get('currency', 'USD')}"
                     
+                    # Extract dates from title and compare with sale_or_service_date
+                    title = invoice.get('title', '')
+                    sale_or_service_date = invoice.get('sale_or_service_date', '')
+                    
+                    # Extract date from title
+                    title_date = self._extract_latest_date(title)
+                    
+                    # Get the latest between extracted date and sale_or_service_date
+                    latest_date = self._get_latest_date_between(title_date, sale_or_service_date)
+                    
                     row = [
                         invoice.get('id', ''),
                         invoice.get('primary_recipient', {}).get('customer_id', ''),
-                        invoice.get('sale_or_service_date', ''),
+                        sale_or_service_date,
                         invoice.get('invoice_number', ''),
-                        invoice.get('title', ''),
+                        title,
                         invoice.get('status', ''),
                         amount_str,
-                        invoice.get('created_at', '')
+                        invoice.get('created_at', ''),
+                        latest_date  # New column
                     ]
                     rows.append(row)
                 
@@ -359,7 +465,7 @@ class SquareSync:
             elif data_type == 'orders' and data:
                 # Save orders with useful fields - up to 500 records
                 headers = ['id', 'customer_id', 'line_item_notes', 'state', 
-                        'total_amount', 'source', 'created_at', 'location_id']
+                        'total_amount', 'source', 'created_at', 'location_id', 'extracted_date']  # Added 'extracted_date'
                 rows = [headers]
                 
                 for order in data[:500]:  # Increased from 100 to 500
@@ -373,6 +479,9 @@ class SquareSync:
                     
                     # Join all notes with semicolon separator
                     combined_notes = '; '.join(notes) if notes else ''
+                    
+                    # Extract latest date from combined notes
+                    extracted_date = self._extract_latest_date(combined_notes)
                     
                     # Get total money
                     total_money = order.get('total_money', {})
@@ -392,7 +501,8 @@ class SquareSync:
                         amount_str,
                         source_name,
                         order.get('created_at', ''),
-                        order.get('location_id', '')
+                        order.get('location_id', ''),
+                        extracted_date  # New column
                     ]
                     rows.append(row)
                 
