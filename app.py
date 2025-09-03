@@ -392,14 +392,88 @@ class SquareSync:
             
             # For customers, save in a tabular format
             if data_type == 'customers' and data:
-                # Extract customer fields
+                # First, gather all invoice and order dates by customer_id
+                invoice_dates_by_customer = {}
+                order_dates_by_customer = {}
+                
+                # Try to fetch invoice dates
+                try:
+                    invoice_sheet_name = f"{merchant_id}_invoices"
+                    invoice_sheet = self._get_sheet(invoice_sheet_name, create_if_missing=False)
+                    if invoice_sheet:
+                        invoice_records = invoice_sheet.get_all_records()
+                        for invoice in invoice_records:
+                            customer_id = invoice.get('customer_id', '')
+                            latest_date = invoice.get('latest_date', '')
+                            if customer_id and latest_date:
+                                if customer_id not in invoice_dates_by_customer:
+                                    invoice_dates_by_customer[customer_id] = []
+                                invoice_dates_by_customer[customer_id].append(latest_date)
+                except Exception as e:
+                    print(f"⚠️ Could not fetch invoice dates: {e}")
+                
+                # Try to fetch order dates
+                try:
+                    order_sheet_name = f"{merchant_id}_orders"
+                    order_sheet = self._get_sheet(order_sheet_name, create_if_missing=False)
+                    if order_sheet:
+                        order_records = order_sheet.get_all_records()
+                        for order in order_records:
+                            customer_id = order.get('customer_id', '')
+                            extracted_date = order.get('extracted_date', '')
+                            if customer_id and extracted_date:
+                                if customer_id not in order_dates_by_customer:
+                                    order_dates_by_customer[customer_id] = []
+                                order_dates_by_customer[customer_id].append(extracted_date)
+                except Exception as e:
+                    print(f"⚠️ Could not fetch order dates: {e}")
+                
+                # Extract customer fields with new latest_activity_date column
                 headers = ['id', 'given_name', 'family_name', 'email', 'phone_number', 
-                        'company_name', 'created_at', 'updated_at', 'birthday', 'note']
+                        'company_name', 'created_at', 'updated_at', 'birthday', 'note', 'latest_activity_date']
                 
                 rows = [headers]
                 for customer in data:
+                    customer_id = customer.get('id', '')
+                    
+                    # Collect all dates for this customer
+                    all_dates = []
+                    
+                    # Add invoice dates
+                    if customer_id in invoice_dates_by_customer:
+                        all_dates.extend(invoice_dates_by_customer[customer_id])
+                    
+                    # Add order dates  
+                    if customer_id in order_dates_by_customer:
+                        all_dates.extend(order_dates_by_customer[customer_id])
+                    
+                    # Find the latest date
+                    latest_activity = ''
+                    if all_dates:
+                        try:
+                            from datetime import datetime
+                            parsed_dates = []
+                            for date_str in all_dates:
+                                try:
+                                    # Parse the date string (assuming YYYY-MM-DD format)
+                                    date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+                                    parsed_dates.append(date_obj)
+                                except:
+                                    # Try ISO format
+                                    try:
+                                        date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00').split('T')[0])
+                                        parsed_dates.append(date_obj)
+                                    except:
+                                        continue
+                            
+                            if parsed_dates:
+                                latest_date_obj = max(parsed_dates)
+                                latest_activity = latest_date_obj.strftime('%Y-%m-%d')
+                        except Exception as e:
+                            print(f"⚠️ Error parsing dates for customer {customer_id}: {e}")
+                    
                     row = [
-                        customer.get('id', ''),
+                        customer_id,
                         customer.get('given_name', ''),
                         customer.get('family_name', ''),
                         customer.get('email_address', ''),
@@ -408,7 +482,8 @@ class SquareSync:
                         customer.get('created_at', ''),
                         customer.get('updated_at', ''),
                         customer.get('birthday', ''),
-                        customer.get('note', '')
+                        customer.get('note', ''),
+                        latest_activity  # New column
                     ]
                     rows.append(row)
                 
@@ -417,13 +492,13 @@ class SquareSync:
                 for i in range(0, len(rows), batch_size):
                     batch = rows[i:i+batch_size]
                     if i == 0:
-                        # First batch includes headers
-                        sheet.update(f'A{i+1}:J{i+len(batch)}', batch)
+                        # First batch includes headers - now with 11 columns (A through K)
+                        sheet.update(f'A{i+1}:K{i+len(batch)}', batch)
                     else:
                         # Subsequent batches append data
                         sheet.append_rows(batch[1:])  # Skip header row in subsequent batches
                 
-                print(f"✅ Saved {len(data)} {data_type} records")
+                print(f"✅ Saved {len(data)} {data_type} records with activity dates")
                 return True
                 
             elif data_type == 'invoices' and data:
@@ -591,19 +666,7 @@ class SquareSync:
         access_token = tokens['access_token']
         success_count = 0
         
-        # Fetch and save customers
-        try:
-            customers = self.fetch_customers_simple(access_token)
-            if customers:
-                if self.save_json_data(merchant_id, 'customers', customers):
-                    success_count += 1
-                    print(f"✅ Customers: {len(customers)} saved")
-            else:
-                print("⚠️ No customers fetched")
-        except Exception as e:
-            print(f"❌ Customer sync error: {e}")
-        
-        # Fetch and save invoices (with fresh location IDs)
+        # Fetch and save invoices FIRST (with fresh location IDs)
         try:
             invoices = self.fetch_invoices_simple(access_token, merchant_id)
             if invoices:
@@ -615,7 +678,7 @@ class SquareSync:
         except Exception as e:
             print(f"❌ Invoice sync error: {e}")
         
-        # Try orders but don't fail if no permission
+        # Try orders SECOND but don't fail if no permission
         try:
             orders = self.fetch_orders_simple(access_token, merchant_id)
             if orders:
@@ -626,6 +689,18 @@ class SquareSync:
                 print("⚠️ No orders fetched (may lack permission)")
         except Exception as e:
             print(f"⚠️ Order sync skipped: {e}")
+        
+        # Fetch and save customers LAST (so they can reference invoice/order dates)
+        try:
+            customers = self.fetch_customers_simple(access_token)
+            if customers:
+                if self.save_json_data(merchant_id, 'customers', customers):
+                    success_count += 1
+                    print(f"✅ Customers: {len(customers)} saved")
+            else:
+                print("⚠️ No customers fetched")
+        except Exception as e:
+            print(f"❌ Customer sync error: {e}")
         
         # Update sync status if at least one data type was saved
         if success_count > 0:
