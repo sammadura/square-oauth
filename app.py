@@ -136,6 +136,25 @@ class SquareSync:
         
         return ''
     
+    def _get_latest_date_between(self, date1_str, date2_str):
+        """Compare two date strings and return the later one"""
+        from datetime import datetime
+        
+        if not date1_str and not date2_str:
+            return ''
+        if not date1_str:
+            return date2_str
+        if not date2_str:
+            return date1_str
+        
+        try:
+            # Handle ISO format dates
+            date1 = datetime.fromisoformat(date1_str.replace('Z', '+00:00').split('T')[0])
+            date2 = datetime.fromisoformat(date2_str.replace('Z', '+00:00').split('T')[0])
+            return date1_str if date1 >= date2 else date2_str
+        except:
+            return date1_str or date2_str
+
     def _get_sheet(self, sheet_name, create_if_missing=True):
         """Get or create a Google Sheet"""
         try:
