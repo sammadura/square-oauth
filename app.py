@@ -15,7 +15,7 @@ app = Flask(__name__)
 # Configuration
 SQUARE_API_VERSION = '2025-08-20'
 SYNC_INTERVAL_HOURS = 12
-SYNC_THRESHOLD_DAYS = 3
+SYNC_THRESHOLD_DAYS = 1
 TOKEN_REFRESH_DAYS = 25
 CUSTOMER_HISTORY_DAYS = 90
 
@@ -765,9 +765,7 @@ def dashboard():
             <td>{sync_display}</td>
             <td>
                 <a href="/api/sync/{merchant_id}" style="background: #28a745; color: white; 
-                   padding: 8px 12px; text-decoration: none; border-radius: 4px; margin: 2px;">Sync</a>
-                <a href="/api/export/{merchant_id}" style="background: #007bff; color: white; 
-                   padding: 8px 12px; text-decoration: none; border-radius: 4px; margin: 2px;">Export</a>
+                   padding: 8px 12px; text-decoration: none; border-radius: 4px; margin: 2px;">Sync Now</a>
             </td>
         </tr>
         '''
@@ -785,14 +783,15 @@ def dashboard():
     <div style="background: #e9ecef; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
         <h3>📊 Status</h3>
         <p><strong>Connected Merchants:</strong> {len(merchants)}</p>
-        <p><strong>Auto-sync:</strong> Every {SYNC_INTERVAL_HOURS} hours</p>
+        <p><strong>Auto-sync:</strong> Every {SYNC_INTERVAL_HOURS} hours (checks for updates older than {SYNC_THRESHOLD_DAYS} day)</p>
+        <p><strong>Next check:</strong> Background sync running</p>
     </div>
     
     <table>
         <tr>
             <th>Business Name</th>
             <th>Merchant ID</th>
-            <th>Customers</th>
+            <th>Records</th>
             <th>Locations</th>
             <th>Last Sync</th>
             <th>Actions</th>
@@ -804,7 +803,7 @@ def dashboard():
         <a href="/signin" style="background: #28a745; color: white; padding: 10px 20px; 
            text-decoration: none; border-radius: 5px; margin: 5px;">➕ Connect New Account</a>
         <a href="/api/force-sync-all" style="background: #ffc107; color: black; padding: 10px 20px; 
-           text-decoration: none; border-radius: 5px; margin: 5px;">🔄 Sync All</a>
+           text-decoration: none; border-radius: 5px; margin: 5px;">🔄 Sync All Now</a>
     </div>
     '''
 
@@ -835,36 +834,6 @@ def manual_sync(merchant_id):
                text-decoration: none; border-radius: 5px;">Back to Dashboard</a>
         </div>
         ''', 500
-
-@app.route('/api/export/<merchant_id>')
-def export_csv(merchant_id):
-    """Export customer data as CSV"""
-    try:
-        sheet_name = f"{merchant_id}_customers"
-        sheet = sync._get_sheet(sheet_name, create_if_missing=False)
-        
-        if not sheet:
-            return f'No data found for {merchant_id}. Try syncing first.', 404
-        
-        data = sheet.get_all_values()
-        if not data:
-            return f'Sheet is empty for {merchant_id}', 404
-        
-        # Create CSV
-        output = StringIO()
-        writer = csv.writer(output)
-        writer.writerows(data)
-        
-        filename = f'{merchant_id}_customers_{datetime.now().strftime("%Y%m%d")}.csv'
-        
-        return Response(
-            output.getvalue(),
-            mimetype='text/csv',
-            headers={'Content-Disposition': f'attachment; filename={filename}'}
-        )
-        
-    except Exception as e:
-        return f'Export failed: {str(e)}', 500
 
 @app.route('/api/force-sync-all')
 def force_sync_all():
