@@ -276,7 +276,7 @@ class SquareSync:
             # Clear existing data
             sheet.clear()
             
-            # For customers, save in a tabular format instead of JSON blob
+            # For customers, save in a tabular format
             if data_type == 'customers' and data:
                 # Extract customer fields
                 headers = ['id', 'given_name', 'family_name', 'email', 'phone_number', 
@@ -312,38 +312,44 @@ class SquareSync:
                 print(f"✅ Saved {len(data)} {data_type} records")
                 return True
                 
-            elif data:
-                # For invoices and orders, save as structured data
-                # Save summary info and first few records
-                headers = ['timestamp', 'data_type', 'count', 'sample_ids']
-                timestamp = datetime.now().isoformat()
+            elif data_type == 'invoices' and data:
+                # Save invoices with only the fields you need
+                headers = ['id', 'customer_id', 'sale_or_service_date']
+                rows = [headers]
                 
-                # Get first 10 IDs as sample
-                sample_ids = [item.get('id', '') for item in data[:10]]
-                sample_ids_str = ', '.join(sample_ids)
-                
-                row = [timestamp, data_type, len(data), sample_ids_str]
-                
-                sheet.update('A1:D2', [headers, row])
-                
-                # Save detailed data starting from row 4
-                if data_type == 'invoices':
-                    detail_headers = ['id', 'invoice_number', 'title', 'status', 'total_amount', 'created_at']
-                    detail_rows = [detail_headers]
-                    for invoice in data[:50]:  # Limit to first 50
-                        total = invoice.get('payment_requests', [{}])[0].get('total_money', {})
-                        row = [
-                            invoice.get('id', ''),
-                            invoice.get('invoice_number', ''),
-                            invoice.get('title', ''),
-                            invoice.get('status', ''),
-                            f"{total.get('amount', 0)/100:.2f}" if total.get('amount') else '0',
-                            invoice.get('created_at', '')
-                        ]
-                        detail_rows.append(row)
+                for invoice in data[:100]:  # Limit to 100 records
+                    # Get sale_or_service_date from the invoice
+                    sale_or_service_date = invoice.get('sale_or_service_date', '')
                     
-                    sheet.update(f'A4:F{4+len(detail_rows)}', detail_rows)
-                    
+                    row = [
+                        invoice.get('id', ''),
+                        invoice.get('primary_recipient', {}).get('customer_id', ''),
+                        sale_or_service_date
+                    ]
+                    rows.append(row)
+                
+                # Update all at once (up to 101 rows including header)
+                sheet.update(f'A1:C{len(rows)}', rows)
+                
+                print(f"✅ Saved {len(data)} {data_type} records")
+                return True
+                
+            elif data_type == 'orders' and data:
+                # Save orders with only the fields you need
+                headers = ['id', 'customer_id', 'note']
+                rows = [headers]
+                
+                for order in data[:100]:  # Limit to 100 records
+                    row = [
+                        order.get('id', ''),
+                        order.get('customer_id', ''),
+                        order.get('note', '')
+                    ]
+                    rows.append(row)
+                
+                # Update all at once (up to 101 rows including header)
+                sheet.update(f'A1:C{len(rows)}', rows)
+                
                 print(f"✅ Saved {len(data)} {data_type} records")
                 return True
             
