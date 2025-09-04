@@ -884,12 +884,12 @@ class SquareSync:
     
     def get_ghl_config(self, merchant_id):
         """Get GHL configuration from environment variables"""
-        # Check if GHL sync is enabled in env
+        # All merchants use the same GHL account from env vars
         if os.environ.get('GHL_API_KEY') and os.environ.get('GHL_LOCATION_ID'):
             return {
                 'api_key': os.environ.get('GHL_API_KEY'),
                 'location_id': os.environ.get('GHL_LOCATION_ID'),
-                'subaccount_name': os.environ.get('GHL_SUBACCOUNT_NAME', 'GHL Account'),
+                'subaccount_name': os.environ.get('GHL_SUBACCOUNT_NAME', 'Main GHL Account'),
                 'enabled': True
             }
         return None
@@ -913,9 +913,18 @@ class SquareSync:
         sheet_name = f"{merchant_id}_ghl_synced"
         sheet = self._get_sheet(sheet_name)
         
-        if sheet and not sheet.get_all_values():
+        # Check if sheet exists and has headers
+        try:
+            values = sheet.get_all_values()
+            if not values or len(values) == 0:
+                # Sheet is empty, add headers
+                headers = ['square_id', 'ghl_contact_id', 'email', 'phone', 
+                        'last_synced', 'sync_status', 'ghl_subaccount']
+                sheet.append_row(headers)
+        except:
+            # If any error, ensure headers exist
             headers = ['square_id', 'ghl_contact_id', 'email', 'phone', 
-                      'last_synced', 'sync_status', 'ghl_subaccount']
+                    'last_synced', 'sync_status', 'ghl_subaccount']
             sheet.append_row(headers)
         
         return sheet
@@ -1332,12 +1341,8 @@ def dashboard():
         name = merchant.get('merchant_name', 'Unknown')
         customers = merchant.get('total_customers', 0)
         
-        # GHL status
-        ghl_status = "❌ Not configured"
-        ghl_subaccount = ""
-        if merchant.get('ghl_sync_enabled'):
-            ghl_subaccount = merchant.get('ghl_subaccount_name', 'Unknown')
-            ghl_status = f"✅ {ghl_subaccount}"
+        # GHL is configured via env vars now
+        ghl_status = "✅ Enabled" if os.environ.get('GHL_API_KEY') else "❌ Not configured"
         
         table_rows += f'''
         <tr>
@@ -1347,7 +1352,6 @@ def dashboard():
             <td>{ghl_status}</td>
             <td>
                 <a href="/api/sync/{merchant_id}" class="btn-small">Sync Square</a>
-                <a href="/configure-ghl/{merchant_id}" class="btn-small">Configure GHL</a>
                 <a href="/api/sync-ghl/{merchant_id}" class="btn-small">Sync to GHL</a>
             </td>
         </tr>
@@ -1498,92 +1502,6 @@ def health():
         'merchants_connected': len(sync.get_all_merchants())
     })
 
-@app.route('/configure-ghl/<merchant_id>')
-def configure_ghl(merchant_id):
-    """Configure GHL for a merchant"""
-    return f'''
-    <style>
-        body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; }}
-        .form-group {{ margin-bottom: 20px; }}
-        label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
-        input {{ width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }}
-        .btn {{ background: #28a745; color: white; padding: 10px 20px; border: none; 
-               border-radius: 5px; cursor: pointer; }}
-    </style>
-    
-    <h1>🔗 Configure GoHighLevel Integration</h1>
-    <p>Connect Square merchant <code>{merchant_id}</code> to a GoHighLevel subaccount</p>
-    
-    <form action="/save-ghl-config" method="POST">
-        <input type="hidden" name="merchant_id" value="{merchant_id}">
-        
-        <div class="form-group">
-            <label>GHL API Key:</label>
-            <input type="text" name="ghl_api_key" required 
-                   placeholder="Enter your GHL subaccount API key">
-        </div>
-        
-        <div class="form-group">
-            <label>GHL Location ID:</label>
-            <input type="text" name="ghl_location_id" required 
-                   placeholder="Enter your GHL location ID">
-        </div>
-        
-        <div class="form-group">
-            <label>Subaccount Name (for reference):</label>
-            <input type="text" name="ghl_subaccount_name" required 
-                   placeholder="e.g., Client ABC Account">
-        </div>
-        
-        <div class="form-group">
-            <label>
-                <input type="checkbox" name="ghl_sync_enabled" value="true" checked>
-                Enable automatic sync to GHL
-            </label>
-        </div>
-        
-        <button type="submit" class="btn">💾 Save Configuration</button>
-    </form>
-    '''
-
-@app.route('/save-ghl-config', methods=['POST'])
-def save_ghl_config():
-    """Save GHL configuration for a merchant"""
-    merchant_id = request.form.get('merchant_id')
-    
-    ghl_config = {
-        'api_key': request.form.get('ghl_api_key'),
-        'location_id': request.form.get('ghl_location_id'),
-        'subaccount_name': request.form.get('ghl_subaccount_name'),
-        'enabled': request.form.get('ghl_sync_enabled') == 'true'
-    }
-    
-    # Get existing tokens
-    tokens = sync.get_tokens(merchant_id)
-    if tokens:
-        success = sync.save_tokens(
-            merchant_id,
-            tokens['access_token'],
-            tokens['refresh_token'],
-            tokens.get('merchant_name'),
-            tokens.get('location_ids', '').split(',') if tokens.get('location_ids') else None,
-            ghl_config
-        )
-        
-        if success:
-            return f'''
-            <div style="max-width: 600px; margin: 50px auto; text-align: center;">
-                <h2 style="color: #28a745;">✅ GHL Configuration Saved!</h2>
-                <p>Merchant {merchant_id} is now connected to:</p>
-                <p><strong>{ghl_config['subaccount_name']}</strong></p>
-                <a href="/dashboard" style="background: #007bff; color: white; 
-                   padding: 10px 20px; text-decoration: none; border-radius: 5px;">
-                   Back to Dashboard
-                </a>
-            </div>
-            '''
-    
-    return 'Configuration failed', 500
 
 @app.route('/api/sync-ghl/<merchant_id>')
 def manual_ghl_sync(merchant_id):
