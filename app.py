@@ -938,7 +938,7 @@ class SquareSync:
             
             # Check if already synced
             square_id = customer_data.get('id')
-            email = customer_data.get('email', '').lower()
+            email = customer_data.get('email_address', '').lower()  # FIXED
             phone = self.normalize_phone(customer_data.get('phone_number', ''))
             
             for record in records:
@@ -949,32 +949,45 @@ class SquareSync:
                     return True, record.get('ghl_contact_id')
         
         # Prepare contact data for GHL
-        # Prepare contact data for GHL
         contact_data = {
             "firstName": customer_data.get('given_name', ''),
             "lastName": customer_data.get('family_name', ''),
-            "email": customer_data.get('email_address', ''),  # Fixed from 'email'
+            "email": customer_data.get('email_address', ''),
             "phone": self.format_phone_for_ghl(customer_data.get('phone_number', '')),
             "companyName": customer_data.get('company_name', ''),
             "tags": ["new_API_customer"],
             "source": f"Square Sync - {merchant_id}"
         }
         
-        # Add latest activity date - CRITICAL FIELD
-        latest_activity = customer_data.get('latest_activity_date')
-        if latest_activity:
-            # Option 1: Use dateOfBirth field (if not using for actual birthdays)
-            contact_data['dateOfBirth'] = latest_activity
-        else:
-            # Log warning if this crucial field is missing
-            print(f"⚠️ WARNING: No latest_activity_date for customer {customer_data.get('email_address', 'Unknown')}")
+        # Get the latest_activity_date - keep it exactly as is
+        latest_activity = customer_data.get('latest_activity_date', '')
         
-        # Remove empty fields (except keep latest_activity even if empty to track)
-        contact_data = {k: v for k, v in contact_data.items() 
-                    if v and (not isinstance(v, list) or len(v) > 0)}
+        # Only add date fields if we actually have a date
+        if latest_activity:
+            # Primary: Use dateOfBirth field
+            contact_data["dateOfBirth"] = latest_activity
+            
+            # Fallback: Also add as custom field for Last Booking Date
+            contact_data["customField"] = {
+                "last_booking_date": latest_activity
+            }
+            
+            print(f"📅 Setting activity date {latest_activity} for {email or phone}")
+        else:
+            print(f"📋 No activity date for {email or phone} - proceeding without date fields")
+        
+        # Remove empty fields
+        cleaned_data = {}
+        for k, v in contact_data.items():
+            if v and (not isinstance(v, list) or len(v) > 0):
+                cleaned_data[k] = v
+        
+        # Log what we're sending
+        activity_status = f"with date: {latest_activity}" if latest_activity else "without activity date"
+        print(f"📤 Sending to GHL: {email or phone} {activity_status}")
         
         # Sync to GHL
-        success, ghl_contact = ghl_manager.upsert_contact(contact_data)
+        success, ghl_contact = ghl_manager.upsert_contact(cleaned_data)
         
         if success and ghl_contact:
             # Update tracking sheet
@@ -990,7 +1003,8 @@ class SquareSync:
                 ]
                 tracking_sheet.append_row(tracking_row)
             
-            print(f"✅ Synced to GHL ({ghl_manager.subaccount_name}): {customer_data.get('email_address', 'No email')}")
+            status_msg = f"with date: {latest_activity}" if latest_activity else "without activity date"
+            print(f"✅ Synced to GHL ({ghl_manager.subaccount_name}): {customer_data.get('email_address', 'No email')} {status_msg}")
             return True, ghl_contact.get('id')
         
         return False, None
@@ -1048,7 +1062,7 @@ class SquareSync:
         
         for customer in customer_records:
             square_id = customer.get('id')
-            email = customer.get('email', '').lower()
+            email = customer.get('email_address', '').lower()
             phone = self.normalize_phone(customer.get('phone_number', ''))
             
             # Skip if already synced
