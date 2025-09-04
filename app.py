@@ -19,10 +19,91 @@ SYNC_THRESHOLD_DAYS = 1
 TOKEN_REFRESH_DAYS = 25
 CUSTOMER_HISTORY_DAYS = 90
 
+
+class GHLManager:
+    def __init__(self, api_key, location_id, subaccount_name=None):
+        self.api_key = api_key
+        self.location_id = location_id
+        self.subaccount_name = subaccount_name
+        self.base_url = "https://services.leadconnectorhq.com"
+        self.rate_limiter = {'last_request': 0, 'request_count': 0}
+    
+    def _rate_limit(self):
+        """Implement rate limiting - 100 requests per 10 seconds"""
+        current_time = time.time()
+        if current_time - self.rate_limiter['last_request'] > 10:
+            # Reset counter after 10 seconds
+            self.rate_limiter = {'last_request': current_time, 'request_count': 1}
+        else:
+            self.rate_limiter['request_count'] += 1
+            if self.rate_limiter['request_count'] >= 100:
+                # Wait for the 10-second window to pass
+                sleep_time = 10 - (current_time - self.rate_limiter['last_request'])
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                self.rate_limiter = {'last_request': time.time(), 'request_count': 1}
+    
+    def upsert_contact(self, contact_data):
+        """Upsert a contact to this GHL subaccount"""
+        self._rate_limit()
+        
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json',
+            'Version': '2021-07-28'
+        }
+        
+        # Add location_id to the contact data
+        contact_data['locationId'] = self.location_id
+        
+        url = f'{self.base_url}/contacts/'
+        
+        try:
+            response = requests.post(url, json=contact_data, headers=headers)
+            if response.status_code in [200, 201]:
+                return True, response.json().get('contact', {})
+            else:
+                print(f"GHL API error for {self.subaccount_name}: {response.status_code} - {response.text}")
+                return False, None
+        except Exception as e:
+            print(f"GHL request failed for {self.subaccount_name}: {e}")
+            return False, None
+    
+    def check_duplicate(self, email=None, phone=None):
+        """Check if contact exists in GHL"""
+        self._rate_limit()
+        
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json',
+            'Version': '2021-07-28'
+        }
+        
+        # Use the search endpoint to check for duplicates
+        params = {'locationId': self.location_id}
+        if email:
+            params['email'] = email
+        elif phone:
+            params['phone'] = phone
+        else:
+            return False, None
+        
+        url = f'{self.base_url}/contacts/search/duplicate'
+        
+        try:
+            response = requests.get(url, params=params, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('contact'):
+                    return True, data['contact']
+            return False, None
+        except:
+            return False, None
 class SquareSync:
     def __init__(self):
         self.sheets_client = None
         self._init_sheets_client()
+        self.ghl_clients = {}  # Cache GHL clients by merchant_id
     
     def _init_sheets_client(self):
         """Initialize Google Sheets client"""
@@ -194,17 +275,19 @@ class SquareSync:
             print(f"❌ Square API error: {e}")
             return None
     
-    def save_tokens(self, merchant_id, access_token, refresh_token, merchant_name=None, location_ids=None):
-        """Save or update merchant tokens"""
+    def save_tokens(self, merchant_id, access_token, refresh_token, merchant_name=None, location_ids=None, ghl_config=None):
+        """Enhanced save with GHL configuration"""
         sheet = self._get_sheet('tokens')
         if not sheet:
             return False
         
-        # Ensure headers exist
+        # Enhanced headers with GHL fields
         try:
             if not sheet.get_all_values():
                 headers = ['merchant_id', 'access_token', 'refresh_token', 'updated_at', 
-                          'status', 'merchant_name', 'last_sync', 'total_customers', 'location_ids']
+                          'status', 'merchant_name', 'last_sync', 'total_customers', 
+                          'location_ids', 'ghl_api_key', 'ghl_location_id', 
+                          'ghl_subaccount_name', 'ghl_sync_enabled', 'ghl_last_sync']
                 sheet.append_row(headers)
         except:
             pass
@@ -213,23 +296,39 @@ class SquareSync:
         current_time = datetime.now().isoformat()
         location_ids_str = ','.join(location_ids) if location_ids else ''
         
+        # Prepare GHL config values
+        ghl_api_key = ghl_config.get('api_key', '') if ghl_config else ''
+        ghl_location_id = ghl_config.get('location_id', '') if ghl_config else ''
+        ghl_subaccount_name = ghl_config.get('subaccount_name', '') if ghl_config else ''
+        ghl_sync_enabled = ghl_config.get('enabled', False) if ghl_config else False
+        
         # Update existing or add new
         for i, record in enumerate(records, start=2):
             if record.get('merchant_id') == merchant_id:
-                # Update existing
+                # Keep existing GHL config if not provided
+                if not ghl_config:
+                    ghl_api_key = record.get('ghl_api_key', '')
+                    ghl_location_id = record.get('ghl_location_id', '')
+                    ghl_subaccount_name = record.get('ghl_subaccount_name', '')
+                    ghl_sync_enabled = record.get('ghl_sync_enabled', False)
+                
                 update_data = [access_token, refresh_token, current_time, 'active', 
                              merchant_name or record.get('merchant_name', ''),
                              record.get('last_sync', ''), record.get('total_customers', 0),
-                             location_ids_str or record.get('location_ids', '')]
-                sheet.update(f'B{i}:I{i}', [update_data])
+                             location_ids_str or record.get('location_ids', ''),
+                             ghl_api_key, ghl_location_id, ghl_subaccount_name,
+                             ghl_sync_enabled, record.get('ghl_last_sync', '')]
+                sheet.update(f'B{i}:N{i}', [update_data])
                 print(f"✅ Updated tokens for {merchant_id}")
                 return True
         
-        # Add new merchant
+        # Add new merchant with GHL config
         new_row = [merchant_id, access_token, refresh_token, current_time, 
-                   'active', merchant_name or '', '', 0, location_ids_str]
+                   'active', merchant_name or '', '', 0, location_ids_str,
+                   ghl_api_key, ghl_location_id, ghl_subaccount_name,
+                   ghl_sync_enabled, '']
         sheet.append_row(new_row)
-        print(f"✅ Added new merchant {merchant_id}")
+        print(f"✅ Added new merchant {merchant_id} with GHL config")
         return True
     
     def get_tokens(self, merchant_id):
@@ -662,7 +761,7 @@ class SquareSync:
         return False
     
     def sync_merchant(self, merchant_id):
-        """Simplified sync with better error handling"""
+        """Enhanced sync with automatic GHL push"""
         print(f"🔄 Starting sync for {merchant_id}")
         
         tokens = self.get_tokens(merchant_id)
@@ -711,14 +810,22 @@ class SquareSync:
         
         # Update sync status if at least one data type was saved
         if success_count > 0:
+            # Update sync status
             total_records = len(customers) if 'customers' in locals() else 0
             self.update_sync_status(merchant_id, total_records)
-            print(f"✅ Sync completed: {success_count}/3 data types saved")
+            
+            # Check if GHL is configured for this merchant
+            ghl_config = self.get_ghl_config(merchant_id)
+            if ghl_config and ghl_config.get('enabled'):
+                print(f"🔄 Starting GHL sync for {merchant_id}")
+                ghl_count = self.batch_sync_merchant_to_ghl(merchant_id)
+                print(f"✅ Synced {ghl_count} new customers to GHL subaccount: {ghl_config.get('subaccount_name')}")
+            
+            print(f"✅ Full sync completed for {merchant_id}")
             return True
         
-        print(f"❌ Sync failed - no data saved for {merchant_id}")
         return False
-
+    
     def clear_location_ids(self, merchant_id):
         """Clear stored location IDs to force refresh"""
         tokens = self.get_tokens(merchant_id)
@@ -774,6 +881,249 @@ class SquareSync:
         
         print(f"✅ Found {len(location_ids)} locations: {location_names}")
         return location_ids
+    
+    def get_ghl_config(self, merchant_id):
+        """Get GHL configuration for a specific merchant"""
+        tokens = self.get_tokens(merchant_id)
+        if not tokens:
+            return None
+        
+        if not tokens.get('ghl_sync_enabled'):
+            return None
+        
+        return {
+            'api_key': tokens.get('ghl_api_key'),
+            'location_id': tokens.get('ghl_location_id'),
+            'subaccount_name': tokens.get('ghl_subaccount_name', 'Unknown'),
+            'enabled': tokens.get('ghl_sync_enabled', False)
+        }
+    
+    def get_ghl_manager(self, merchant_id):
+        """Get or create GHL manager for merchant"""
+        if merchant_id not in self.ghl_clients:
+            config = self.get_ghl_config(merchant_id)
+            if config and config['api_key'] and config['location_id']:
+                self.ghl_clients[merchant_id] = GHLManager(
+                    config['api_key'],
+                    config['location_id'],
+                    config['subaccount_name']
+                )
+            else:
+                return None
+        return self.ghl_clients.get(merchant_id)
+    
+    def get_ghl_sync_tracking_sheet(self, merchant_id):
+        """Get merchant-specific GHL sync tracking"""
+        sheet_name = f"{merchant_id}_ghl_synced"
+        sheet = self._get_sheet(sheet_name)
+        
+        if sheet and not sheet.get_all_values():
+            headers = ['square_id', 'ghl_contact_id', 'email', 'phone', 
+                      'last_synced', 'sync_status', 'ghl_subaccount']
+            sheet.append_row(headers)
+        
+        return sheet
+    
+    def sync_customer_to_ghl(self, merchant_id, customer_data):
+        """Sync a single customer to the merchant's GHL subaccount"""
+        ghl_manager = self.get_ghl_manager(merchant_id)
+        if not ghl_manager:
+            print(f"❌ No GHL configuration for merchant {merchant_id}")
+            return False, None
+        
+        # Check tracking sheet for existing sync
+        tracking_sheet = self.get_ghl_sync_tracking_sheet(merchant_id)
+        if tracking_sheet:
+            records = tracking_sheet.get_all_records()
+            
+            # Check if already synced
+            square_id = customer_data.get('id')
+            email = customer_data.get('email', '').lower()
+            phone = self.normalize_phone(customer_data.get('phone_number', ''))
+            
+            for record in records:
+                if (record.get('square_id') == square_id or
+                    (email and record.get('email', '').lower() == email) or
+                    (phone and self.normalize_phone(record.get('phone', '')) == phone)):
+                    print(f"⏭️ Customer already synced: {email or phone}")
+                    return True, record.get('ghl_contact_id')
+        
+        # Prepare contact data for GHL
+        contact_data = {
+            "firstName": customer_data.get('given_name', ''),
+            "lastName": customer_data.get('family_name', ''),
+            "email": customer_data.get('email', ''),
+            "phone": self.format_phone_for_ghl(customer_data.get('phone_number', '')),
+            "companyName": customer_data.get('company_name', ''),
+            "customFields": [],
+            "tags": ["new_API_customer"],
+            "source": f"Square Sync - {merchant_id}"
+        }
+        
+        # Add latest activity date if available
+        if customer_data.get('latest_activity_date'):
+            contact_data['customFields'].append({
+                "key": "latest_activity_date",
+                "value": customer_data.get('latest_activity_date')
+            })
+        
+        # Remove empty fields
+        contact_data = {k: v for k, v in contact_data.items() 
+                       if v and (not isinstance(v, list) or len(v) > 0)}
+        
+        # Sync to GHL
+        success, ghl_contact = ghl_manager.upsert_contact(contact_data)
+        
+        if success and ghl_contact:
+            # Update tracking sheet
+            if tracking_sheet:
+                tracking_row = [
+                    customer_data.get('id'),
+                    ghl_contact.get('id'),
+                    customer_data.get('email', ''),
+                    customer_data.get('phone_number', ''),
+                    datetime.now().isoformat(),
+                    'synced',
+                    ghl_manager.subaccount_name
+                ]
+                tracking_sheet.append_row(tracking_row)
+            
+            print(f"✅ Synced to GHL ({ghl_manager.subaccount_name}): {customer_data.get('email', 'No email')}")
+            return True, ghl_contact.get('id')
+        
+        return False, None
+    
+    def format_phone_for_ghl(self, phone):
+        """Format phone number for GHL (E.164 format)"""
+        if not phone:
+            return ''
+        
+        # Remove all non-digits
+        digits = ''.join(filter(str.isdigit, phone))
+        
+        # Assume US number if 10 digits
+        if len(digits) == 10:
+            return f'+1{digits}'
+        elif len(digits) == 11 and digits[0] == '1':
+            return f'+{digits}'
+        else:
+            return phone  # Return original if can't format
+    
+    def batch_sync_merchant_to_ghl(self, merchant_id):
+        """Batch sync all new customers for a merchant to their GHL subaccount"""
+        ghl_config = self.get_ghl_config(merchant_id)
+        if not ghl_config or not ghl_config.get('enabled'):
+            print(f"⏭️ GHL sync not enabled for merchant {merchant_id}")
+            return 0
+        
+        print(f"🔄 Starting GHL sync for {merchant_id} to {ghl_config.get('subaccount_name')}")
+        
+        # Get customer sheet
+        customers_sheet = self._get_sheet(f"{merchant_id}_customers", create_if_missing=False)
+        if not customers_sheet:
+            print(f"❌ No customer data for merchant {merchant_id}")
+            return 0
+        
+        # Get tracking sheet to identify already synced
+        tracking_sheet = self.get_ghl_sync_tracking_sheet(merchant_id)
+        synced_ids = set()
+        synced_emails = set()
+        synced_phones = set()
+        
+        if tracking_sheet:
+            records = tracking_sheet.get_all_records()
+            for record in records:
+                if record.get('sync_status') == 'synced':
+                    synced_ids.add(record.get('square_id'))
+                    if record.get('email'):
+                        synced_emails.add(record.get('email').lower())
+                    if record.get('phone'):
+                        synced_phones.add(self.normalize_phone(record.get('phone')))
+        
+        # Process customers
+        customer_records = customers_sheet.get_all_records()
+        new_customers = []
+        
+        for customer in customer_records:
+            square_id = customer.get('id')
+            email = customer.get('email', '').lower()
+            phone = self.normalize_phone(customer.get('phone_number', ''))
+            
+            # Skip if already synced
+            if (square_id in synced_ids or 
+                (email and email in synced_emails) or 
+                (phone and phone in synced_phones)):
+                continue
+            
+            new_customers.append(customer)
+        
+        if not new_customers:
+            print(f"✅ No new customers to sync for {merchant_id}")
+            return 0
+        
+        print(f"📊 Found {len(new_customers)} new customers to sync")
+        success_count = 0
+        
+        for customer in new_customers:
+            success, ghl_id = self.sync_customer_to_ghl(merchant_id, customer)
+            if success:
+                success_count += 1
+        
+        # Update GHL last sync time
+        self.update_ghl_sync_status(merchant_id, success_count)
+        
+        print(f"✅ GHL sync complete for {merchant_id}: {success_count}/{len(new_customers)} successful")
+        return success_count
+    
+    def normalize_phone(self, phone):
+        """Normalize phone for comparison"""
+        if not phone:
+            return ''
+        # Remove all non-digits
+        return ''.join(filter(str.isdigit, phone))
+
+    def update_ghl_sync_status(self, merchant_id, synced_count):
+        """Update GHL sync timestamp in tokens sheet"""
+        sheet = self._get_sheet('tokens', create_if_missing=False)
+        if not sheet:
+            return False
+        
+        records = sheet.get_all_records()
+        for i, record in enumerate(records, start=2):
+            if record.get('merchant_id') == merchant_id:
+                sheet.update(f'N{i}', [[datetime.now().isoformat()]])
+                return True
+        return False
+    
+    def sync_all_merchants_to_ghl(self):
+        """Sync all merchants to their respective GHL subaccounts"""
+        merchants = self.get_all_merchants()
+        results = {}
+        
+        for merchant in merchants:
+            merchant_id = merchant['merchant_id']
+            merchant_name = merchant.get('merchant_name', 'Unknown')
+            ghl_subaccount = merchant.get('ghl_subaccount_name', 'Not configured')
+            
+            if not merchant.get('ghl_sync_enabled'):
+                results[merchant_id] = {
+                    'merchant_name': merchant_name,
+                    'ghl_subaccount': ghl_subaccount,
+                    'status': 'skipped',
+                    'count': 0
+                }
+                continue
+            
+            count = self.batch_sync_merchant_to_ghl(merchant_id)
+            results[merchant_id] = {
+                'merchant_name': merchant_name,
+                'ghl_subaccount': ghl_subaccount,
+                'status': 'synced',
+                'count': count
+            }
+        
+        return results
+
 
 # Global sync instance
 sync = SquareSync()
@@ -960,76 +1310,49 @@ def dashboard():
                text-decoration: none; border-radius: 8px;">Connect Square Account</a>
         </div>
         '''
+        pass
     
-    # Build merchant table
+    
+    # Build enhanced merchant table
     table_rows = ""
     for merchant in merchants:
         merchant_id = merchant['merchant_id']
         name = merchant.get('merchant_name', 'Unknown')
         customers = merchant.get('total_customers', 0)
-        last_sync = merchant.get('last_sync', 'Never')
-        location_ids = merchant.get('location_ids', '')
-        location_count = len([l for l in location_ids.split(',') if l.strip()]) if location_ids else 0
         
-        # Format last sync
-        sync_display = 'Never'
-        if last_sync and last_sync != 'Never':
-            try:
-                sync_date = datetime.fromisoformat(last_sync.replace('Z', '+00:00'))
-                days_ago = (datetime.now() - sync_date.replace(tzinfo=None)).days
-                sync_display = f'{days_ago} days ago' if days_ago > 0 else 'Today'
-            except:
-                pass
+        # GHL status
+        ghl_status = "❌ Not configured"
+        ghl_subaccount = ""
+        if merchant.get('ghl_sync_enabled'):
+            ghl_subaccount = merchant.get('ghl_subaccount_name', 'Unknown')
+            ghl_status = f"✅ {ghl_subaccount}"
         
         table_rows += f'''
         <tr>
             <td>{name}</td>
             <td><code>{merchant_id}</code></td>
             <td>{customers:,}</td>
-            <td>{location_count}</td>
-            <td>{sync_display}</td>
+            <td>{ghl_status}</td>
             <td>
-                <a href="/api/sync/{merchant_id}" style="background: #28a745; color: white; 
-                   padding: 8px 12px; text-decoration: none; border-radius: 4px; margin: 2px;">Sync Now</a>
+                <a href="/api/sync/{merchant_id}" class="btn-small">Sync Square</a>
+                <a href="/configure-ghl/{merchant_id}" class="btn-small">Configure GHL</a>
+                <a href="/api/sync-ghl/{merchant_id}" class="btn-small">Sync to GHL</a>
             </td>
         </tr>
         '''
     
     return f'''
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
-        th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
-        th {{ background-color: #f2f2f2; }}
-    </style>
-    
-    <h1>🔄 Square Sync Dashboard</h1>
-    
-    <div style="background: #e9ecef; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
-        <h3>📊 Status</h3>
-        <p><strong>Connected Merchants:</strong> {len(merchants)}</p>
-        <p><strong>Auto-sync:</strong> Every {SYNC_INTERVAL_HOURS} hours (checks for updates older than {SYNC_THRESHOLD_DAYS} day)</p>
-        <p><strong>Next check:</strong> Background sync running</p>
-    </div>
-    
+    <!-- Enhanced dashboard HTML with GHL column -->
     <table>
         <tr>
             <th>Business Name</th>
             <th>Merchant ID</th>
-            <th>Records</th>
-            <th>Locations</th>
-            <th>Last Sync</th>
+            <th>Customers</th>
+            <th>GHL Subaccount</th>
             <th>Actions</th>
         </tr>
         {table_rows}
     </table>
-    
-    <div style="margin-top: 20px;">
-        <a href="/signin" style="background: #28a745; color: white; padding: 10px 20px; 
-           text-decoration: none; border-radius: 5px; margin: 5px;">➕ Connect New Account</a>
-        <a href="/api/force-sync-all" style="background: #ffc107; color: black; padding: 10px 20px; 
-           text-decoration: none; border-radius: 5px; margin: 5px;">🔄 Sync All Now</a>
-    </div>
     '''
 
 @app.route('/api/sync/<merchant_id>')
@@ -1162,6 +1485,109 @@ def health():
         'timestamp': datetime.now().isoformat(),
         'merchants_connected': len(sync.get_all_merchants())
     })
+
+@app.route('/configure-ghl/<merchant_id>')
+def configure_ghl(merchant_id):
+    """Configure GHL for a merchant"""
+    return f'''
+    <style>
+        body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; }}
+        .form-group {{ margin-bottom: 20px; }}
+        label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
+        input {{ width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }}
+        .btn {{ background: #28a745; color: white; padding: 10px 20px; border: none; 
+               border-radius: 5px; cursor: pointer; }}
+    </style>
+    
+    <h1>🔗 Configure GoHighLevel Integration</h1>
+    <p>Connect Square merchant <code>{merchant_id}</code> to a GoHighLevel subaccount</p>
+    
+    <form action="/save-ghl-config" method="POST">
+        <input type="hidden" name="merchant_id" value="{merchant_id}">
+        
+        <div class="form-group">
+            <label>GHL API Key:</label>
+            <input type="text" name="ghl_api_key" required 
+                   placeholder="Enter your GHL subaccount API key">
+        </div>
+        
+        <div class="form-group">
+            <label>GHL Location ID:</label>
+            <input type="text" name="ghl_location_id" required 
+                   placeholder="Enter your GHL location ID">
+        </div>
+        
+        <div class="form-group">
+            <label>Subaccount Name (for reference):</label>
+            <input type="text" name="ghl_subaccount_name" required 
+                   placeholder="e.g., Client ABC Account">
+        </div>
+        
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="ghl_sync_enabled" value="true" checked>
+                Enable automatic sync to GHL
+            </label>
+        </div>
+        
+        <button type="submit" class="btn">💾 Save Configuration</button>
+    </form>
+    '''
+
+@app.route('/save-ghl-config', methods=['POST'])
+def save_ghl_config():
+    """Save GHL configuration for a merchant"""
+    merchant_id = request.form.get('merchant_id')
+    
+    ghl_config = {
+        'api_key': request.form.get('ghl_api_key'),
+        'location_id': request.form.get('ghl_location_id'),
+        'subaccount_name': request.form.get('ghl_subaccount_name'),
+        'enabled': request.form.get('ghl_sync_enabled') == 'true'
+    }
+    
+    # Get existing tokens
+    tokens = sync.get_tokens(merchant_id)
+    if tokens:
+        success = sync.save_tokens(
+            merchant_id,
+            tokens['access_token'],
+            tokens['refresh_token'],
+            tokens.get('merchant_name'),
+            tokens.get('location_ids', '').split(',') if tokens.get('location_ids') else None,
+            ghl_config
+        )
+        
+        if success:
+            return f'''
+            <div style="max-width: 600px; margin: 50px auto; text-align: center;">
+                <h2 style="color: #28a745;">✅ GHL Configuration Saved!</h2>
+                <p>Merchant {merchant_id} is now connected to:</p>
+                <p><strong>{ghl_config['subaccount_name']}</strong></p>
+                <a href="/dashboard" style="background: #007bff; color: white; 
+                   padding: 10px 20px; text-decoration: none; border-radius: 5px;">
+                   Back to Dashboard
+                </a>
+            </div>
+            '''
+    
+    return 'Configuration failed', 500
+
+@app.route('/api/sync-ghl/<merchant_id>')
+def manual_ghl_sync(merchant_id):
+    """Manually trigger GHL sync for a merchant"""
+    count = sync.batch_sync_merchant_to_ghl(merchant_id)
+    
+    return f'''
+    <div style="max-width: 600px; margin: 50px auto; text-align: center;">
+        <h2 style="color: #28a745;">✅ GHL Sync Complete!</h2>
+        <p><strong>{count}</strong> new customers synced to GoHighLevel</p>
+        <a href="/dashboard" style="background: #007bff; color: white; 
+           padding: 10px 20px; text-decoration: none; border-radius: 5px;">
+           Back to Dashboard
+        </a>
+    </div>
+    '''
 
 # Expose sync methods for backwards compatibility
 def get_tokens_from_sheets(merchant_id):
