@@ -949,27 +949,29 @@ class SquareSync:
                     return True, record.get('ghl_contact_id')
         
         # Prepare contact data for GHL
+        # Prepare contact data for GHL
         contact_data = {
             "firstName": customer_data.get('given_name', ''),
             "lastName": customer_data.get('family_name', ''),
-            "email": customer_data.get('email', ''),
+            "email": customer_data.get('email_address', ''),  # Fixed from 'email'
             "phone": self.format_phone_for_ghl(customer_data.get('phone_number', '')),
             "companyName": customer_data.get('company_name', ''),
-            "customFields": [],
             "tags": ["new_API_customer"],
             "source": f"Square Sync - {merchant_id}"
         }
         
-        # Add latest activity date if available
-        if customer_data.get('latest_activity_date'):
-            contact_data['customFields'].append({
-                "key": "latest_activity_date",
-                "value": customer_data.get('latest_activity_date')
-            })
+        # Add latest activity date - CRITICAL FIELD
+        latest_activity = customer_data.get('latest_activity_date')
+        if latest_activity:
+            # Option 1: Use dateOfBirth field (if not using for actual birthdays)
+            contact_data['dateOfBirth'] = latest_activity
+        else:
+            # Log warning if this crucial field is missing
+            print(f"⚠️ WARNING: No latest_activity_date for customer {customer_data.get('email_address', 'Unknown')}")
         
-        # Remove empty fields
+        # Remove empty fields (except keep latest_activity even if empty to track)
         contact_data = {k: v for k, v in contact_data.items() 
-                       if v and (not isinstance(v, list) or len(v) > 0)}
+                    if v and (not isinstance(v, list) or len(v) > 0)}
         
         # Sync to GHL
         success, ghl_contact = ghl_manager.upsert_contact(contact_data)
@@ -980,7 +982,7 @@ class SquareSync:
                 tracking_row = [
                     customer_data.get('id'),
                     ghl_contact.get('id'),
-                    customer_data.get('email', ''),
+                    customer_data.get('email_address', ''),
                     customer_data.get('phone_number', ''),
                     datetime.now().isoformat(),
                     'synced',
@@ -988,7 +990,7 @@ class SquareSync:
                 ]
                 tracking_sheet.append_row(tracking_row)
             
-            print(f"✅ Synced to GHL ({ghl_manager.subaccount_name}): {customer_data.get('email', 'No email')}")
+            print(f"✅ Synced to GHL ({ghl_manager.subaccount_name}): {customer_data.get('email_address', 'No email')}")
             return True, ghl_contact.get('id')
         
         return False, None
