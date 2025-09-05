@@ -918,19 +918,24 @@ class SquareSync:
         sheet_name = f"{merchant_id}_ghl_synced"
         sheet = self._get_sheet(sheet_name)
         
-        # Check if sheet exists and has headers
-        try:
-            values = sheet.get_all_values()
-            if not values or len(values) == 0:
-                # Sheet is empty, add headers
-                headers = ['square_id', 'ghl_contact_id', 'email', 'phone', 
-                        'last_synced', 'sync_status', 'ghl_subaccount']
-                sheet.append_row(headers)
-        except:
-            # If any error, ensure headers exist
-            headers = ['square_id', 'ghl_contact_id', 'email', 'phone', 
-                    'last_synced', 'sync_status', 'ghl_subaccount']
-            sheet.append_row(headers)
+        if sheet:
+            try:
+                all_values = sheet.get_all_values()
+                # If sheet is completely empty, add headers
+                if not all_values or len(all_values) == 0:
+                    headers = ['square_id', 'ghl_contact_id', 'email', 'phone', 
+                            'last_synced', 'sync_status', 'ghl_subaccount']
+                    sheet.append_row(headers)
+                    print(f"📝 Initialized GHL tracking sheet for {merchant_id}")
+            except Exception as e:
+                print(f"⚠️ Error checking tracking sheet: {e}")
+                # Try to add headers anyway
+                try:
+                    headers = ['square_id', 'ghl_contact_id', 'email', 'phone', 
+                            'last_synced', 'sync_status', 'ghl_subaccount']
+                    sheet.append_row(headers)
+                except:
+                    pass
         
         return sheet
     
@@ -1057,14 +1062,21 @@ class SquareSync:
         synced_phones = set()
         
         if tracking_sheet:
-            records = tracking_sheet.get_all_records()
-            for record in records:
-                if record.get('sync_status') == 'synced':
-                    synced_ids.add(record.get('square_id'))
-                    if record.get('email'):
-                        synced_emails.add(record.get('email').lower())
-                    if record.get('phone'):
-                        synced_phones.add(self.normalize_phone(record.get('phone')))
+            try:
+                # Safely get records - handle empty sheet
+                all_values = tracking_sheet.get_all_values()
+                if len(all_values) > 1:  # Has headers and at least one data row
+                    records = tracking_sheet.get_all_records()
+                    for record in records:
+                        if record.get('sync_status') == 'synced':
+                            synced_ids.add(record.get('square_id'))
+                            if record.get('email'):
+                                synced_emails.add(record.get('email').lower())
+                            if record.get('phone'):
+                                synced_phones.add(self.normalize_phone(record.get('phone')))
+            except IndexError:
+                # Sheet is empty or only has headers, continue with empty sets
+                print("📝 Starting fresh GHL sync - no previous records")
         
         # Process customers
         customer_records = customers_sheet.get_all_records()
@@ -1072,7 +1084,7 @@ class SquareSync:
         
         for customer in customer_records:
             square_id = customer.get('id')
-            email = customer.get('email_address', '').lower()
+            email = customer.get('email_address', '').lower()  # Fixed from 'email'
             phone = self.normalize_phone(customer.get('phone_number', ''))
             
             # Skip if already synced
