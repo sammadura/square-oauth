@@ -946,6 +946,11 @@ class SquareSync:
             print(f"❌ No GHL configuration for merchant {merchant_id}")
             return False, None
         
+        # Define these variables FIRST (before any conditional blocks)
+        square_id = customer_data.get('id')
+        email = customer_data.get('email_address', '').lower()
+        phone = self.normalize_phone(customer_data.get('phone_number', ''))
+        
         # Check tracking sheet for existing sync
         tracking_sheet = self.get_ghl_sync_tracking_sheet(merchant_id)
         if tracking_sheet:
@@ -961,10 +966,6 @@ class SquareSync:
                 records = []
             
             # Check if already synced
-            square_id = customer_data.get('id')
-            email = customer_data.get('email_address', '').lower()  # FIXED
-            phone = self.normalize_phone(customer_data.get('phone_number', ''))
-            
             for record in records:
                 if (record.get('square_id') == square_id or
                     (email and record.get('email', '').lower() == email) or
@@ -1120,6 +1121,7 @@ class SquareSync:
             success, ghl_id = self.sync_customer_to_ghl(merchant_id, customer)
             if success:
                 success_count += 1
+            time.sleep(0.5)  
         
         # Update GHL last sync time
         self.update_ghl_sync_status(merchant_id, success_count)
