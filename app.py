@@ -883,15 +883,20 @@ class SquareSync:
         return location_ids
     
     def get_ghl_config(self, merchant_id):
-        """Get GHL configuration from environment variables"""
-        # All merchants use the same GHL account from env vars
-        if os.environ.get('GHL_API_KEY') and os.environ.get('GHL_LOCATION_ID'):
+        """Get GHL configuration from environment variables (not from sheet)"""
+        # Use environment variables for GHL config since you manage it
+        ghl_api_key = os.environ.get('GHL_API_KEY')
+        ghl_location_id = os.environ.get('GHL_LOCATION_ID')
+        
+        if ghl_api_key and ghl_location_id:
             return {
-                'api_key': os.environ.get('GHL_API_KEY'),
-                'location_id': os.environ.get('GHL_LOCATION_ID'),
+                'api_key': ghl_api_key,
+                'location_id': ghl_location_id,
                 'subaccount_name': os.environ.get('GHL_SUBACCOUNT_NAME', 'Main GHL Account'),
                 'enabled': True
             }
+        
+        print(f"⚠️ GHL not configured in environment variables")
         return None
     
     def get_ghl_manager(self, merchant_id):
