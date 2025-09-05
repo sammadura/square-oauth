@@ -979,7 +979,7 @@ class SquareSync:
             "email": customer_data.get('email_address', ''),
             "phone": self.format_phone_for_ghl(customer_data.get('phone_number', '')),
             "companyName": customer_data.get('company_name', ''),
-            "tags": ["new_API_customer"],
+            "tags": ["new_lead_customer"],  # Changed from new_API_customer
             "source": f"Square Sync - {merchant_id}"
         }
         
@@ -1038,8 +1038,11 @@ class SquareSync:
         if not phone:
             return ''
         
+        # Convert to string first to handle integers from sheets
+        phone_str = str(phone)
+        
         # Remove all non-digits
-        digits = ''.join(filter(str.isdigit, phone))
+        digits = ''.join(filter(str.isdigit, phone_str))
         
         # Assume US number if 10 digits
         if len(digits) == 10:
@@ -1047,7 +1050,7 @@ class SquareSync:
         elif len(digits) == 11 and digits[0] == '1':
             return f'+{digits}'
         else:
-            return phone  # Return original if can't format
+            return phone_str  # Return original if can't format
     
     def batch_sync_merchant_to_ghl(self, merchant_id):
         """Batch sync all new customers for a merchant to their GHL subaccount"""
