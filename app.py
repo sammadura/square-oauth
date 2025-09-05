@@ -1117,8 +1117,10 @@ class SquareSync:
         """Normalize phone for comparison"""
         if not phone:
             return ''
+        # Convert to string first (handles cases where sheets returns int)
+        phone_str = str(phone)
         # Remove all non-digits
-        return ''.join(filter(str.isdigit, phone))
+        return ''.join(filter(str.isdigit, phone_str))
 
     def update_ghl_sync_status(self, merchant_id, synced_count):
         """Update GHL sync timestamp in tokens sheet"""
