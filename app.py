@@ -949,7 +949,16 @@ class SquareSync:
         # Check tracking sheet for existing sync
         tracking_sheet = self.get_ghl_sync_tracking_sheet(merchant_id)
         if tracking_sheet:
-            records = tracking_sheet.get_all_records()
+            try:
+                # Handle empty sheet case
+                all_values = tracking_sheet.get_all_values()
+                if len(all_values) <= 1:  # Only headers or empty
+                    records = []
+                else:
+                    records = tracking_sheet.get_all_records()
+            except (IndexError, Exception) as e:
+                print(f"⚠️ Tracking sheet read error (treating as empty): {e}")
+                records = []
             
             # Check if already synced
             square_id = customer_data.get('id')
@@ -1074,9 +1083,11 @@ class SquareSync:
                                 synced_emails.add(record.get('email').lower())
                             if record.get('phone'):
                                 synced_phones.add(self.normalize_phone(record.get('phone')))
-            except IndexError:
+                else:
+                    print("📝 Starting fresh GHL sync - no previous records")
+            except (IndexError, Exception) as e:
                 # Sheet is empty or only has headers, continue with empty sets
-                print("📝 Starting fresh GHL sync - no previous records")
+                print(f"📝 Starting fresh GHL sync - tracking sheet error: {e}")
         
         # Process customers
         customer_records = customers_sheet.get_all_records()
