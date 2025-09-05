@@ -986,16 +986,11 @@ class SquareSync:
         
         # Get the latest_activity_date - keep it exactly as is
         latest_activity = customer_data.get('latest_activity_date', '')
-        
+    
         # Only add date fields if we actually have a date
         if latest_activity:
-            # Primary: Use dateOfBirth field
+            # Use dateOfBirth field to store the activity date
             contact_data["dateOfBirth"] = latest_activity
-            
-            # Fallback: Also add as custom field for Last Booking Date
-            contact_data["customField"] = {
-                "last_booking_date": latest_activity
-            }
             
             print(f"📅 Setting activity date {latest_activity} for {email or phone}")
         else:
