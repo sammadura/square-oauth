@@ -105,6 +105,31 @@ class SquareSync:
         self._init_sheets_client()
         self.ghl_clients = {}  # Cache GHL clients by merchant_id
     
+    # Add this after the class definition and __init__ method
+    def _sheets_rate_limit(self):
+        """Rate limit for Google Sheets API (60 requests/minute)"""
+        if not hasattr(self, '_sheets_last_request'):
+            self._sheets_last_request = 0
+            self._sheets_request_count = 0
+        
+        current_time = time.time()
+        
+        # Reset counter every 60 seconds
+        if current_time - self._sheets_last_request > 60:
+            self._sheets_last_request = current_time
+            self._sheets_request_count = 1
+        else:
+            self._sheets_request_count += 1
+            
+            # If approaching limit (50 requests to be safe), wait
+            if self._sheets_request_count >= 50:
+                sleep_time = 60 - (current_time - self._sheets_last_request)
+                if sleep_time > 0:
+                    print(f"⏸️ Rate limiting: waiting {sleep_time:.1f}s for Sheets API")
+                    time.sleep(sleep_time)
+                self._sheets_last_request = time.time()
+                self._sheets_request_count = 1
+
     def _init_sheets_client(self):
         """Initialize Google Sheets client"""
         try:
@@ -237,8 +262,10 @@ class SquareSync:
             return date1_str or date2_str
 
     def _get_sheet(self, sheet_name, create_if_missing=True):
-        """Get or create a Google Sheet"""
+        """Get or create a Google Sheet with rate limiting"""
         try:
+            self._sheets_rate_limit()
+            
             spreadsheet_id = os.environ.get('GOOGLE_SHEETS_ID')
             spreadsheet = self.sheets_client.open_by_key(spreadsheet_id)
             
@@ -247,12 +274,33 @@ class SquareSync:
             except:
                 if create_if_missing:
                     print(f"📝 Creating sheet: {sheet_name}")
+                    self._sheets_rate_limit()
                     return spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=30)
                 return None
         except Exception as e:
             print(f"❌ Sheet error: {e}")
             return None
     
+    # Add this method to the SquareSync class
+    def _sheets_operation_with_retry(self, operation, max_retries=3):
+        """Execute a sheets operation with retry logic for rate limits"""
+        for attempt in range(max_retries):
+            try:
+                self._sheets_rate_limit()
+                return operation()
+            except Exception as e:
+                error_str = str(e)
+                if '429' in error_str or 'RESOURCE_EXHAUSTED' in error_str:
+                    wait_time = (2 ** attempt) * 10  # Exponential backoff: 10, 20, 40 seconds
+                    print(f"⏸️ Rate limit hit, waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
+                    time.sleep(wait_time)
+                else:
+                    raise e
+        
+        # If all retries failed
+        print(f"❌ All retries exhausted for sheets operation")
+        return None
+
     def _make_square_request(self, endpoint, access_token, method='GET', data=None):
         """Make Square API request with consistent error handling"""
         base_url = 'https://connect.squareup.com'
@@ -921,21 +969,21 @@ class SquareSync:
         if sheet:
             try:
                 all_values = sheet.get_all_values()
-                # If sheet is completely empty, add headers
+                # Check if headers exist by looking at first row
                 if not all_values or len(all_values) == 0:
+                    # Sheet is completely empty, add headers
                     headers = ['square_id', 'ghl_contact_id', 'email', 'phone', 
                             'last_synced', 'sync_status', 'ghl_subaccount']
                     sheet.append_row(headers)
                     print(f"📝 Initialized GHL tracking sheet for {merchant_id}")
-            except Exception as e:
-                print(f"⚠️ Error checking tracking sheet: {e}")
-                # Try to add headers anyway
-                try:
+                elif all_values[0][0] != 'square_id':  # First cell should be 'square_id' header
+                    # First row doesn't have proper headers, add them
                     headers = ['square_id', 'ghl_contact_id', 'email', 'phone', 
                             'last_synced', 'sync_status', 'ghl_subaccount']
-                    sheet.append_row(headers)
-                except:
-                    pass
+                    sheet.insert_row(headers, 1)
+                    print(f"📝 Added headers to GHL tracking sheet for {merchant_id}")
+            except Exception as e:
+                print(f"⚠️ Error checking tracking sheet: {e}")
         
         return sheet
     
@@ -980,7 +1028,7 @@ class SquareSync:
             "email": customer_data.get('email_address', ''),
             "phone": self.format_phone_for_ghl(customer_data.get('phone_number', '')),
             "companyName": customer_data.get('company_name', ''),
-            "tags": ["new_lead_customer"],  # Changed from new_API_customer
+            "tags": ["new_flask_customer"],  # Changed from new_API_customer
             "source": f"Square Sync - {merchant_id}"
         }
         
@@ -1010,12 +1058,11 @@ class SquareSync:
         success, ghl_contact = ghl_manager.upsert_contact(cleaned_data)
         
         if success and ghl_contact:
-            # Update tracking sheet
             if tracking_sheet:
                 tracking_row = [
                     customer_data.get('id'),
                     ghl_contact.get('id'),
-                    customer_data.get('email_address', ''),
+                    customer_data.get('email_address', ''),  # This is correct - Square uses email_address
                     customer_data.get('phone_number', ''),
                     datetime.now().isoformat(),
                     'synced',
@@ -1025,6 +1072,53 @@ class SquareSync:
             
             status_msg = f"with date: {latest_activity}" if latest_activity else "without activity date"
             print(f"✅ Synced to GHL ({ghl_manager.subaccount_name}): {customer_data.get('email_address', 'No email')} {status_msg}")
+            return True, ghl_contact.get('id')
+        
+        return False, None
+
+    def _sync_customer_to_ghl_without_tracking(self, ghl_manager, customer_data, merchant_id):
+        """Sync a single customer to GHL without reading tracking sheet"""
+        # Define variables
+        email = customer_data.get('email_address', '').lower()
+        phone = self.normalize_phone(customer_data.get('phone_number', ''))
+        
+        # Prepare contact data for GHL
+        contact_data = {
+            "firstName": customer_data.get('given_name', ''),
+            "lastName": customer_data.get('family_name', ''),
+            "email": customer_data.get('email_address', ''),
+            "phone": self.format_phone_for_ghl(customer_data.get('phone_number', '')),
+            "companyName": customer_data.get('company_name', ''),
+            "tags": ["new_flask_customer"],
+            "source": f"Square Sync - {merchant_id}"
+        }
+        
+        # Get the latest_activity_date
+        latest_activity = customer_data.get('latest_activity_date', '')
+        
+        # Only add date fields if we actually have a date
+        if latest_activity:
+            contact_data["dateOfBirth"] = latest_activity
+            print(f"📅 Setting activity date {latest_activity} for {email or phone}")
+        else:
+            print(f"📋 No activity date for {email or phone} - proceeding without date fields")
+        
+        # Remove empty fields
+        cleaned_data = {}
+        for k, v in contact_data.items():
+            if v and (not isinstance(v, list) or len(v) > 0):
+                cleaned_data[k] = v
+        
+        # Log what we're sending
+        activity_status = f"with date: {latest_activity}" if latest_activity else "without activity date"
+        print(f"📤 Sending to GHL: {email or phone} {activity_status}")
+        
+        # Sync to GHL
+        success, ghl_contact = ghl_manager.upsert_contact(cleaned_data)
+        
+        if success and ghl_contact:
+            status_msg = f"with date: {latest_activity}" if latest_activity else "without activity date"
+            print(f"✅ Synced to GHL ({ghl_manager.subaccount_name}): {email or 'No email'} {status_msg}")
             return True, ghl_contact.get('id')
         
         return False, None
@@ -1057,44 +1151,59 @@ class SquareSync:
         
         print(f"🔄 Starting GHL sync for {merchant_id} to {ghl_config.get('subaccount_name')}")
         
-        # Get customer sheet
-        customers_sheet = self._get_sheet(f"{merchant_id}_customers", create_if_missing=False)
+        # Get customer sheet with retry logic
+        customers_sheet = self._sheets_operation_with_retry(
+            lambda: self._get_sheet(f"{merchant_id}_customers", create_if_missing=False)
+        )
         if not customers_sheet:
             print(f"❌ No customer data for merchant {merchant_id}")
             return 0
         
-        # Get tracking sheet to identify already synced
-        tracking_sheet = self.get_ghl_sync_tracking_sheet(merchant_id)
+        # Get tracking sheet
+        tracking_sheet = self._sheets_operation_with_retry(
+            lambda: self.get_ghl_sync_tracking_sheet(merchant_id)
+        )
+        
+        # Load ALL tracking data at once (single API call)
         synced_ids = set()
         synced_emails = set()
         synced_phones = set()
         
         if tracking_sheet:
             try:
-                # Safely get records - handle empty sheet
-                all_values = tracking_sheet.get_all_values()
-                if len(all_values) > 1:  # Has headers and at least one data row
-                    records = tracking_sheet.get_all_records()
-                    for record in records:
+                # Single read operation for all tracking data
+                all_records = self._sheets_operation_with_retry(
+                    lambda: tracking_sheet.get_all_records()
+                )
+                
+                if all_records:
+                    for record in all_records:
                         if record.get('sync_status') == 'synced':
                             synced_ids.add(record.get('square_id'))
                             if record.get('email'):
                                 synced_emails.add(record.get('email').lower())
                             if record.get('phone'):
                                 synced_phones.add(self.normalize_phone(record.get('phone')))
+                    print(f"📊 Loaded {len(synced_ids)} existing synced records")
                 else:
                     print("📝 Starting fresh GHL sync - no previous records")
-            except (IndexError, Exception) as e:
-                # Sheet is empty or only has headers, continue with empty sets
+            except Exception as e:
                 print(f"📝 Starting fresh GHL sync - tracking sheet error: {e}")
         
-        # Process customers
-        customer_records = customers_sheet.get_all_records()
-        new_customers = []
+        # Get all customer records (single API call)
+        customer_records = self._sheets_operation_with_retry(
+            lambda: customers_sheet.get_all_records()
+        )
         
+        if not customer_records:
+            print("❌ No customer records found")
+            return 0
+        
+        # Identify new customers to sync
+        new_customers = []
         for customer in customer_records:
             square_id = customer.get('id')
-            email = customer.get('email_address', '').lower()  # Fixed from 'email'
+            email = customer.get('email_address', '').lower()
             phone = self.normalize_phone(customer.get('phone_number', ''))
             
             # Skip if already synced
@@ -1110,13 +1219,47 @@ class SquareSync:
             return 0
         
         print(f"📊 Found {len(new_customers)} new customers to sync")
-        success_count = 0
         
-        for customer in new_customers:
-            success, ghl_id = self.sync_customer_to_ghl(merchant_id, customer)
-            if success:
+        # Get GHL manager
+        ghl_manager = self.get_ghl_manager(merchant_id)
+        if not ghl_manager:
+            print(f"❌ No GHL configuration for merchant {merchant_id}")
+            return 0
+        
+        # Process customers and collect tracking updates
+        success_count = 0
+        tracking_updates = []
+        
+        for i, customer in enumerate(new_customers):
+            # Sync to GHL
+            success, ghl_id = self._sync_customer_to_ghl_without_tracking(
+                ghl_manager, customer, merchant_id
+            )
+            
+            if success and ghl_id:
                 success_count += 1
-            time.sleep(0.5)  
+                # Collect tracking data for batch update
+                tracking_updates.append([
+                    customer.get('id'),
+                    ghl_id,
+                    customer.get('email_address', ''),
+                    customer.get('phone_number', ''),
+                    datetime.now().isoformat(),
+                    'synced',
+                    ghl_manager.subaccount_name
+                ])
+            
+            # Small delay between GHL API calls
+            time.sleep(0.5)
+            
+            # Batch write tracking updates every 20 records or at the end
+            if len(tracking_updates) >= 20 or i == len(new_customers) - 1:
+                if tracking_updates and tracking_sheet:
+                    self._sheets_operation_with_retry(
+                        lambda: tracking_sheet.append_rows(tracking_updates)
+                    )
+                    print(f"📝 Updated tracking for {len(tracking_updates)} customers")
+                    tracking_updates = []
         
         # Update GHL last sync time
         self.update_ghl_sync_status(merchant_id, success_count)
