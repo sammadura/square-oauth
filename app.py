@@ -1081,16 +1081,18 @@ class SquareSync:
 
     def _sync_customer_to_ghl_without_tracking(self, ghl_manager, customer_data, merchant_id):
         """Sync a single customer to GHL without reading tracking sheet"""
-        # Define variables
-        email = customer_data.get('email_address', '').lower()
-        phone = self.normalize_phone(customer_data.get('phone_number', ''))
+        # Handle both possible email field names from sheets
+        email = (customer_data.get('email_address', '') or 
+                customer_data.get('email', '')).lower()
+        phone = self.normalize_phone(customer_data.get('phone_number', '') or 
+                                    customer_data.get('phone', ''))
         
         # Prepare contact data for GHL
         contact_data = {
             "firstName": customer_data.get('given_name', ''),
             "lastName": customer_data.get('family_name', ''),
-            "email": customer_data.get('email_address', ''),
-            "phone": self.format_phone_for_ghl(customer_data.get('phone_number', '')),
+            "email": email,  # Use the extracted email variable
+            "phone": self.format_phone_for_ghl(phone),
             "companyName": customer_data.get('company_name', ''),
             "tags": ["new_flask_customer"],
             "source": f"Square Sync - {merchant_id}"
@@ -1112,9 +1114,10 @@ class SquareSync:
             if v and (not isinstance(v, list) or len(v) > 0):
                 cleaned_data[k] = v
         
-        # Log what we're sending
+        # Log what we're sending with better detail
         activity_status = f"with date: {latest_activity}" if latest_activity else "without activity date"
-        print(f"📤 Sending to GHL: {email or phone} {activity_status}")
+        identifier = email if email else phone if phone else "NO IDENTIFIER"
+        print(f"📤 Sending to GHL: {identifier} {activity_status}")
         
         # Sync to GHL
         success, ghl_contact = ghl_manager.upsert_contact(cleaned_data)
