@@ -996,8 +996,11 @@ class SquareSync:
         
         # Define these variables FIRST (before any conditional blocks)
         square_id = customer_data.get('id')
-        email = customer_data.get('email_address', '').lower()
-        phone = self.normalize_phone(customer_data.get('phone_number', ''))
+        # Handle both possible email field names from sheets
+        email = (customer_data.get('email_address', '') or 
+                customer_data.get('email', '')).lower()
+        phone = self.normalize_phone(customer_data.get('phone_number', '') or 
+                                    customer_data.get('phone', ''))
         
         # Check tracking sheet for existing sync
         tracking_sheet = self.get_ghl_sync_tracking_sheet(merchant_id)
@@ -1025,10 +1028,10 @@ class SquareSync:
         contact_data = {
             "firstName": customer_data.get('given_name', ''),
             "lastName": customer_data.get('family_name', ''),
-            "email": customer_data.get('email_address', ''),
-            "phone": self.format_phone_for_ghl(customer_data.get('phone_number', '')),
+            "email": email,  # Use the extracted email
+            "phone": self.format_phone_for_ghl(phone),
             "companyName": customer_data.get('company_name', ''),
-            "tags": ["new_flask_customer"],  # Changed from new_API_customer
+            "tags": ["new_flask_customer"],
             "source": f"Square Sync - {merchant_id}"
         }
         
@@ -1039,7 +1042,6 @@ class SquareSync:
         if latest_activity:
             # Use dateOfBirth field to store the activity date
             contact_data["dateOfBirth"] = latest_activity
-            
             print(f"📅 Setting activity date {latest_activity} for {email or phone}")
         else:
             print(f"📋 No activity date for {email or phone} - proceeding without date fields")
@@ -1052,7 +1054,8 @@ class SquareSync:
         
         # Log what we're sending
         activity_status = f"with date: {latest_activity}" if latest_activity else "without activity date"
-        print(f"📤 Sending to GHL: {email or phone} {activity_status}")
+        identifier = email if email else phone if phone else "NO IDENTIFIER"
+        print(f"📤 Sending to GHL: {identifier} {activity_status}")
         
         # Sync to GHL
         success, ghl_contact = ghl_manager.upsert_contact(cleaned_data)
@@ -1062,8 +1065,8 @@ class SquareSync:
                 tracking_row = [
                     customer_data.get('id'),
                     ghl_contact.get('id'),
-                    customer_data.get('email_address', ''),  # This is correct - Square uses email_address
-                    customer_data.get('phone_number', ''),
+                    email,  # Use the email variable you already extracted above
+                    phone,  # Use the phone variable you already extracted above
                     datetime.now().isoformat(),
                     'synced',
                     ghl_manager.subaccount_name
@@ -1071,7 +1074,7 @@ class SquareSync:
                 tracking_sheet.append_row(tracking_row)
             
             status_msg = f"with date: {latest_activity}" if latest_activity else "without activity date"
-            print(f"✅ Synced to GHL ({ghl_manager.subaccount_name}): {customer_data.get('email_address', 'No email')} {status_msg}")
+            print(f"✅ Synced to GHL ({ghl_manager.subaccount_name}): {email or 'No email'} {status_msg}")
             return True, ghl_contact.get('id')
         
         return False, None
@@ -1203,8 +1206,9 @@ class SquareSync:
         new_customers = []
         for customer in customer_records:
             square_id = customer.get('id')
-            email = customer.get('email_address', '').lower()
-            phone = self.normalize_phone(customer.get('phone_number', ''))
+            # Handle both possible email field names
+            email = (customer.get('email_address', '') or customer.get('email', '')).lower()
+            phone = self.normalize_phone(customer.get('phone_number', '') or customer.get('phone', ''))
             
             # Skip if already synced
             if (square_id in synced_ids or 
@@ -1242,8 +1246,8 @@ class SquareSync:
                 tracking_updates.append([
                     customer.get('id'),
                     ghl_id,
-                    customer.get('email_address', ''),
-                    customer.get('phone_number', ''),
+                    customer.get('email_address', '') or customer.get('email', ''),  # Handle both
+                    customer.get('phone_number', '') or customer.get('phone', ''),
                     datetime.now().isoformat(),
                     'synced',
                     ghl_manager.subaccount_name
